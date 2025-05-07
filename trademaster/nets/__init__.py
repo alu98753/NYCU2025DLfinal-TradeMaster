@@ -9,3 +9,7 @@ from .sarl import mLSTMClf
 from .eteo import ETEOStacked
 from .pd import PDNet
 from .high_frequency_trading_dqn import HFTQNet
+
+from .titans import PositionalEncoding
+from .titans import TitansPortfolioActor
+from .titans import TitansPortfolioCritic
