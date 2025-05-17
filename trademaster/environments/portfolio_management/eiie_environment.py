@@ -26,8 +26,8 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.test_dynamic=int(get_attr(kwargs, "test_dynamic", "-1"))
         self.task_index = int(get_attr(kwargs, "task_index", "-1"))
         self.work_dir = get_attr(kwargs, "work_dir", "")
-        time_steps = get_attr(self.dataset, "time_steps", 10)
-        self.day = time_steps - 1
+        self.time_steps = get_attr(self.dataset, "time_steps", 10)
+        
 
         self.df_path = None
         if self.task.startswith("train"):
@@ -43,244 +43,239 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.transaction_cost_pct = get_attr(self.dataset, "transaction_cost_pct", 0.001)
         self.tech_indicator_list = get_attr(self.dataset, "tech_indicator_list", [])
 
+        # Load DataFrame
         if self.task.startswith("test_dynamic"):
             dynamics_test_path = get_attr(kwargs, "dynamics_test_path", None)
-            self.df = pd.read_csv(dynamics_test_path, index_col=0)
-            self.start_date = self.df.loc[:, 'date'].iloc[0]
-            self.end_date = self.df.loc[:, 'date'].iloc[-1]
+            df = pd.read_csv(dynamics_test_path)
+            self.start_date_str = df['date'].iloc[0]
+            self.end_date_str = df['date'].iloc[-1]
         else:
-            self.df = pd.read_csv(self.df_path, index_col=0)
+            df = pd.read_csv(self.df_path)
+        
+        # Store the original df only if an exact copy is needed elsewhere
+        # self.df_raw = df.copy()
 
-        self.stock_dim = len(self.df.tic.unique()) #49
-        self.state_space_shape = self.stock_dim
-        self.action_space_shape = self.stock_dim
-        self.time_steps = time_steps
+        # --- NumPy Data Pre-processing ---
+        self.unique_dates = sorted(df['date'].unique())
+        self.unique_tics = sorted(df['tic'].unique())
 
-        self.action_space = spaces.Box(low=-5,
-                                       high=5,
-                                       shape=(self.action_space_shape,))
-        self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(len(self.tech_indicator_list),
-                   self.state_space_shape,
-                   self.time_steps))
+        self.stock_dim = len(self.unique_tics)
+        self.num_tech_indicators = len(self.tech_indicator_list)
+        self.num_unique_dates = len(self.unique_dates)
 
-        self.action_dim = self.action_space.shape[0] #49
-        self.state_dim = self.observation_space.shape[0] #12
+        self.date_to_idx = {date: i for i, date in enumerate(self.unique_dates)}
+        self.tic_to_idx = {tic: i for i, tic in enumerate(self.unique_tics)}
 
-        # print('self.df', self.df.shape)
+        self.data_cube = np.zeros((self.num_unique_dates, self.stock_dim, self.num_tech_indicators), dtype=np.float32) # (num_dates, num_stocks, num_tech_indicators)
+        self.close_prices_cube = np.zeros((self.num_unique_dates, self.stock_dim), dtype=np.float32) # (num_dates, num_stocks)
 
-        self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :]
+        # Pivot and fill data_cube
+        multi_index = pd.MultiIndex.from_product([self.unique_dates, self.unique_tics], names=['date', 'tic'])
+        
+        # Process technical indicators
+        df_for_pivot = df.set_index(['date', 'tic'])
+        for i, tech in enumerate(self.tech_indicator_list):
+            tech_series = df_for_pivot[tech].reindex(multi_index)
+            tech_series_filled = tech_series.ffill().bfill() # Fill within each group first if possible, then globally
+            tech_series_filled = tech_series_filled.fillna(0) # Final fill for any remaining NaNs (e.g., stock starts late)
+            self.data_cube[:, :, i] = tech_series_filled.unstack(level='tic')[self.unique_tics].to_numpy(dtype=np.float32)
+            
+        # Process close prices
+        close_series = df_for_pivot['close'].reindex(multi_index)
+        close_series_filled = close_series.ffill().bfill()
+        close_series_filled = close_series_filled.fillna(0) # Should be cautious with filling close price with 0
+        self.close_prices_cube = close_series_filled.unstack(level='tic')[self.unique_tics].to_numpy(dtype=np.float32)
 
-        # print('self.data', self.data.shape)
+        self.state_space_shape = self.stock_dim 
+        self.action_space_shape = self.stock_dim 
+        
+        self.action_space = spaces.Box(low=-5, high=5, shape=(self.action_space_shape,))
+        self.observation_space = spaces.Box(low=-np.inf,high=np.inf,
+            shape=(self.stock_dim, self.time_steps,self.num_tech_indicators) )
 
-        # print('1', self.data.shape)
-        print(self.data.tic.unique())
-        self.state = np.array([[
-            self.data[self.data.tic == tic][tech].values.tolist()
-            for tech in self.tech_indicator_list
-        ] for tic in self.data.tic.unique()])
-        # print('2', self.state.shape)
-        self.state = np.transpose(self.state, (0, 2, 1))
-        # print('3', self.state.shape)
+        self.action_dim = self.action_space.shape[0] # stock_dim
+        self.state_dim = self.num_tech_indicators # self.observation_space.shape[0] was num_features
+
+        self.day_idx = self.time_steps - 1 # Current day index in unique_dates
+
+        # Initial state calculation
+        start_slice_idx = self.day_idx - self.time_steps + 1
+        end_slice_idx = self.day_idx + 1
+
+        # Ensure slices are within bounds, pad if necessary for initial steps
+        actual_start_idx = max(0, start_slice_idx)
+        state_window_data = self.data_cube[actual_start_idx:end_slice_idx, :, :] # (slice_len, stock_dim, num_features)
+
+        if state_window_data.shape[0] < self.time_steps: # If not enough history at the beginning
+            padding_needed = self.time_steps - state_window_data.shape[0]
+            padding_array = np.zeros((padding_needed, self.stock_dim, self.num_tech_indicators), dtype=np.float32)
+            state_window_data = np.concatenate((padding_array, state_window_data), axis=0)
+        
+        # Reshape to (stock_dim, num_features, time_steps) then transpose to (stock_dim, time_steps, num_features)
+        raw_state_format = np.transpose(state_window_data, (1, 2, 0)) # (stock_dim, num_features, time_steps)
+        self.state = np.transpose(raw_state_format, (0, 2, 1))       # (stock_dim, time_steps, num_features)
 
         self.terminal = False
-        self.portfolio_value = self.initial_amount
-        self.asset_memory = [self.initial_amount]
-        self.portfolio_return_memory = [0]
-        self.weights_memory = [[1] + [0] * self.stock_dim]
-        self.date_memory = [self.data.date.unique()[0]]
-        self.transaction_cost_memory = []
+        self.portfolio_value = float(self.initial_amount)
+        self.asset_memory = [float(self.initial_amount)]
+        self.portfolio_return_memory = [0.0]
+        self.weights_memory = [[1.0] + [0.0] * self.stock_dim] 
+        self.date_memory = [self.unique_dates[self.day_idx]]
+        self.transaction_cost_memory = [] 
         self.test_id = 'agent'
 
     def reset(self):
+        self.day_idx = self.time_steps - 1
 
-        all_tics = self.df['tic'].unique()
+        start_slice_idx = self.day_idx - self.time_steps + 1
+        end_slice_idx = self.day_idx + 1
+        
+        actual_start_idx = max(0, start_slice_idx)
+        state_window_data = self.data_cube[actual_start_idx:end_slice_idx, :, :]
 
-        template_df = pd.DataFrame({
-            'tic': all_tics
-        })
+        if state_window_data.shape[0] < self.time_steps:
+            padding_needed = self.time_steps - state_window_data.shape[0]
+            padding_array = np.zeros((padding_needed, self.stock_dim, self.num_tech_indicators), dtype=np.float32)
+            state_window_data = np.concatenate((padding_array, state_window_data), axis=0)
 
-        self.day = self.time_steps - 1
-        #print('day', self.day)
-        self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :]
-        #print('data', self.data)
-
-        self.data = pd.merge(template_df, self.data, on='tic', how='left')
-        self.data = self.data.ffill().bfill()
-        '''
-        #print('tic', self.data.tic.unique())
-        self.state = np.array([[
-            self.data[self.data.tic == tic][tech].values.tolist()
-            for tech in self.tech_indicator_list
-        ] for tic in self.data.tic.unique()])
-        print('state', self.state.shape)
-        '''
-        expected_length = self.time_steps
-        all_tics = self.data.tic.unique()
-
-        # 重新建立 self.state，確保每個 tic 的技術指標都是 time_steps 長度
-        self.state = np.array([
-            [
-                self.data[self.data.tic == tic][tech].values[-expected_length:].tolist()
-                if len(self.data[self.data.tic == tic]) >= expected_length 
-                else [0] * expected_length
-                for tech in self.tech_indicator_list
-            ]
-            for tic in all_tics
-        ])
-
-
-        self.state = np.transpose(self.state, (0, 2, 1))
-        # self.state = np.transpose(self.state, (2, 0, 1))
-
+        raw_state_format = np.transpose(state_window_data, (1, 2, 0)) # (stock_dim, num_features, time_steps)
+        self.state = np.transpose(raw_state_format, (0, 2, 1))       # (stock_dim, time_steps, num_features)
 
         self.terminal = False
-        self.portfolio_value = self.initial_amount
-        self.asset_memory = [self.initial_amount]
-        self.portfolio_return_memory = [0]
-        self.weights_memory = [[1 / (self.stock_dim + 1)] *
-                               (self.stock_dim + 1)]
-        self.date_memory = [self.data.date.unique()[0]]
+        self.portfolio_value = float(self.initial_amount)
+        self.asset_memory = [float(self.initial_amount)]
+        self.portfolio_return_memory = [0.0]
+        # Original reset weights: [[1 / (self.stock_dim + 1)] * (self.stock_dim + 1)]
+        initial_weight_val = 1.0 / (self.stock_dim + 1)
+        self.weights_memory = [[initial_weight_val] * (self.stock_dim + 1)]
+        self.date_memory = [self.unique_dates[self.day_idx]]
         self.transaction_cost_memory = []
+        
+        return self.state.astype(np.float32)
 
-        return self.state
+    def step(self, weights: np.ndarray):
+        weights = np.asarray(weights, dtype=np.float32)
 
-    def step(self, weights):
-        # make judgement about whether our data is running out
-        self.terminal = self.day >= len(self.df.index.unique()) - 1
-        weights = np.array(weights)
+        self.terminal = self.day_idx >= self.num_unique_dates - 1
 
         if self.terminal:
             if self.task.startswith("test_dynamic"):
-                print(f'Date from {self.start_date} to {self.end_date}')
+                print(f'Date from {self.start_date_str} to {self.end_date_str}')
+            
             tr, sharpe_ratio, vol, mdd, cr, sor = self.analysis_result()
             stats = OrderedDict(
                 {
                     "Total Return": ["{:04f}%".format(tr * 100)],
                     "Sharp Ratio": ["{:04f}".format(sharpe_ratio)],
-                    "Volatility": ["{:04f}%".format(vol* 100)],
-                    "Max Drawdown": ["{:04f}%".format(mdd* 100)],
-                    # "Calmar Ratio": ["{:04f}".format(cr)],
-                    # "Sortino Ratio": ["{:04f}".format(sor)],
+                    "Volatility": ["{:04f}%".format(vol * 100)],
+                    "Max Drawdown": ["{:04f}%".format(mdd * 100)],
                 }
             )
             table = print_metrics(stats)
             print(table)
 
             df_return = self.save_portfolio_return_memory()
-            daily_return = df_return.daily_return.values
+            daily_return_values = df_return.daily_return.values
             df_value = self.save_asset_memory()
-            assets = df_value["total assets"].values
-            #TODO calculate the buy and hold
+            assets_values = df_value["total assets"].values
+
             save_dict = OrderedDict(
                 {
                     "Profit Margin": tr * 100,
-                    "Excess Profit": tr * 100-0,
-                    "daily_return": daily_return,
-                    "total_assets": assets
+                    "Excess Profit": tr * 100 - 0,
+                    "daily_return": daily_return_values,
+                    "total_assets": assets_values
                 }
             )
-            metric_save_path=osp.join(self.work_dir,'metric_'+str(self.task)+'_'+str(self.test_dynamic)+'_'+str(self.test_id)+'_'+str(self.task_index)+'.pickle')
-            if self.task == 'test_dynamic':
+            metric_save_path = osp.join(self.work_dir, f'metric_{self.task}_{self.test_dynamic}_{self.test_id}_{self.task_index}.pickle')
+            if self.task == 'test_dynamic': 
                 with open(metric_save_path, 'wb') as handle:
                     pickle.dump(save_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-            return self.state, 0, self.terminal, {"sharpe_ratio": sharpe_ratio,"total_assets": assets}
-
-        else:  # directly use the process of
-            all_tics = self.df['tic'].unique()
-
-            template_df = pd.DataFrame({
-                'tic': all_tics
-            })
-
-            self.weights_memory.append(weights)
-            last_day_memory = self.df.loc[self.day, :]
-            last_day_memory = pd.merge(template_df, last_day_memory, on='tic', how='left')
-            last_day_memory = last_day_memory.ffill().bfill()  # 前向填補和後向填補
-
-            self.day += 1
-            self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :]
-
-            self.data = pd.merge(template_df, self.data, on='tic', how='left')
-            self.data = self.data.ffill().bfill()
-
-            #print(self.df.tic.unique())
-            '''
-            self.state = np.array([[
-                self.data[self.data.tic == tic][tech].values.tolist()
-                for tech in self.tech_indicator_list
-            ] for tic in self.data.tic.unique()])
-            '''
-
-            expected_length = self.time_steps
-            all_tics = self.data.tic.unique()
-
-            # 重新建立 self.state，確保每個 tic 的技術指標都是 time_steps 長度
-            self.state = np.array([
-                [
-                    self.data[self.data.tic == tic][tech].values[-expected_length:].tolist()
-                    if len(self.data[self.data.tic == tic]) >= expected_length 
-                    else [0] * expected_length
-                    for tech in self.tech_indicator_list
-                ]
-                for tic in all_tics
-            ])
             
-            self.state = np.transpose(self.state, (0, 2, 1))
-            #print(self.state.shape)
+            # For terminal state, return the last valid state that led to termination.
+            # The current self.state is for day_idx, which is the terminal day.
+            return self.state.astype(np.float32), 0.0, self.terminal, {"sharpe_ratio": sharpe_ratio, "total_assets": assets_values}
 
+        else:
+            self.weights_memory.append(weights.tolist()) # Store agent's target weights for this step
 
-            # self.state = np.transpose(self.state, (2, 0, 1))
-           
-            new_price_memory = self.df.loc[self.day, :]
-            new_price_memory = pd.merge(template_df, new_price_memory, on='tic', how='left')
-            new_price_memory = new_price_memory.ffill().bfill()  # 前向填補和後向填補
-            # print('new_price_memory', new_price_memory.shape)
+            last_day_close_prices_slice = self.close_prices_cube[self.day_idx, :] # Prices at current self.day_idx (t)
 
-            portfolio_weights = weights[1:]
-            portfolio_return = sum(
-                ((new_price_memory.close.values / last_day_memory.close.values)
-                 - 1) * portfolio_weights)
-            weights_brandnew = self.normalization([weights[0]] + list(
-                np.array(weights[1:]) *
-                np.array((new_price_memory.close.values /
-                          last_day_memory.close.values))))
+            self.day_idx += 1 # Move to next day (t+1)
 
-            self.weights_memory.append(weights_brandnew)
-            weights_old = (self.weights_memory[-3])
-            weights_new = (self.weights_memory[-2])
-            diff_weights = np.sum(
-                np.abs(np.array(weights_old) - np.array(weights_new)))
+            # New state for day t+1
+            start_slice_idx = self.day_idx - self.time_steps + 1
+            end_slice_idx = self.day_idx + 1
+            actual_start_idx = max(0, start_slice_idx)
+            state_window_data = self.data_cube[actual_start_idx:end_slice_idx, :, :]
+
+            if state_window_data.shape[0] < self.time_steps:
+                padding_needed = self.time_steps - state_window_data.shape[0]
+                padding_array = np.zeros((padding_needed, self.stock_dim, self.num_tech_indicators), dtype=np.float32)
+                state_window_data = np.concatenate((padding_array, state_window_data), axis=0)
+            
+            raw_state_format = np.transpose(state_window_data, (1, 2, 0))
+            self.state = np.transpose(raw_state_format, (0, 2, 1))
+
+            current_day_close_prices_slice = self.close_prices_cube[self.day_idx, :] # Prices at new self.day_idx (t+1)
+
+            portfolio_weights_stocks = weights[1:] # Stock weights (excluding cash weight at index 0)
+            
+            # Price ratios from t to t+1.
+            price_ratios = np.divide(current_day_close_prices_slice, last_day_close_prices_slice,
+                                     out=np.ones_like(current_day_close_prices_slice, dtype=np.float32),
+                                     where=last_day_close_prices_slice != 0)
+            
+            gross_portfolio_return = np.sum((price_ratios - 1) * portfolio_weights_stocks)
+
+            new_stock_weights_after_price_change = portfolio_weights_stocks * price_ratios
+            weights_after_price_change = np.concatenate(([weights[0]], new_stock_weights_after_price_change))
+            weights_brandnew = self.normalization(weights_after_price_change)
+            self.weights_memory.append(weights_brandnew.tolist()) # weights_memory has: ..., W_brandnew_prev, W_agent_curr (weights), W_brandnew_curr
+
+            # Transaction cost calculation 
+            weights_old_tx = np.array(self.weights_memory[-3], dtype=np.float32) # W_brandnew_prev
+            weights_new_tx = np.array(self.weights_memory[-2], dtype=np.float32) # W_agent_curr
+            diff_weights = np.sum(np.abs(weights_old_tx - weights_new_tx))
+
             transcationfee = diff_weights * self.transaction_cost_pct * self.portfolio_value
-            new_portfolio_value = (self.portfolio_value -
-                                   transcationfee) * (1 + portfolio_return)
-            portfolio_return = (new_portfolio_value -
-                                self.portfolio_value) / self.portfolio_value
-            self.reward = np.log(new_portfolio_value) - np.log(
-                self.portfolio_value)
-            self.portfolio_value = new_portfolio_value
+            
+            value_after_cost_and_return = (self.portfolio_value - transcationfee) * (1 + gross_portfolio_return)
+            
+            if self.portfolio_value == 0: # Avoid division by zero for net_portfolio_return
+                 net_portfolio_return = 0.0 if value_after_cost_and_return == 0 else np.inf # Or some large number
+            else:
+                net_portfolio_return = (value_after_cost_and_return - self.portfolio_value) / self.portfolio_value
+            
+            # Reward: log return, with safe guards for log(0) or log(<0)
+            if value_after_cost_and_return > 1e-9 and self.portfolio_value > 1e-9: # Use small epsilon
+                self.reward = np.log(value_after_cost_and_return / self.portfolio_value)
+            elif value_after_cost_and_return > 1e-9 and self.portfolio_value <= 1e-9:
+                self.reward = np.log(value_after_cost_and_return / 1e-9) # Large positive reward
+            elif value_after_cost_and_return <= 1e-9 and self.portfolio_value > 1e-9:
+                self.reward = np.log(1e-9 / self.portfolio_value) # Large negative reward
+            else: # both are very small or zero
+                self.reward = 0.0
+            
+            self.portfolio_value = value_after_cost_and_return
 
-            self.portfolio_return_memory.append(portfolio_return)
-            self.date_memory.append(self.data.date.unique()[-1])
-            self.asset_memory.append(new_portfolio_value)
+            self.portfolio_return_memory.append(net_portfolio_return)
+            self.date_memory.append(self.unique_dates[self.day_idx])
+            self.asset_memory.append(self.portfolio_value)
 
-            self.reward = self.reward
+            return self.state.astype(np.float32), float(self.reward), self.terminal, {"weights_brandnew": weights_brandnew.tolist()}
 
-        return self.state, self.reward, self.terminal, {"weights_brandnew":weights_brandnew}
+    def normalization(self, actions: np.ndarray) -> np.ndarray:
+        actions = np.asarray(actions, dtype=np.float32)
+        s = np.sum(actions)
+        if np.abs(s) < 1e-9: # Check if sum is close to zero
+            if not np.any(actions): # All actions are zero
+                return actions 
+            # If actions are not all zero but sum to zero (e.g., [1, -1]), return NaNs
+            return np.full_like(actions, np.nan, dtype=np.float32)
+        return actions / s
 
-    def normalization(self, actions):
-        # a normalization function not only for actions to transfer into weights but also for the weights of the
-        # portfolios whose prices have been changed through time
-        actions = np.array(actions)
-        sum = np.sum(actions)
-        actions = actions / sum
-        return actions
-
-    def save_portfolio_return_memory(self):
-        # a record of return for each time stamp
+    def save_portfolio_return_memory(self) -> pd.DataFrame:
         date_list = self.date_memory
         df_date = pd.DataFrame(date_list)
         df_date.columns = ['date']
@@ -288,11 +283,11 @@ class PortfolioManagementEIIEEnvironment(Environments):
         return_list = self.portfolio_return_memory
         df_return = pd.DataFrame(return_list)
         df_return.columns = ["daily_return"]
-        df_return.index = df_date.date
-
+        if not df_date.empty: # Check if df_date is not empty before setting index
+             df_return.index = df_date.date
         return df_return
 
-    def save_asset_memory(self):
+    def save_asset_memory(self) -> pd.DataFrame:
         # a record of asset values for each time stamp
         date_list = self.date_memory
         df_date = pd.DataFrame(date_list)
@@ -301,46 +296,77 @@ class PortfolioManagementEIIEEnvironment(Environments):
         assets_list = self.asset_memory
         df_value = pd.DataFrame(assets_list)
         df_value.columns = ["total assets"]
-        df_value.index = df_date.date
-
+        if not df_date.empty: # Check if df_date is not empty
+            df_value.index = df_date.date
         return df_value
 
-    def analysis_result(self):
-        # A simpler API for the environment to analysis itself when coming to terminal
+    def analysis_result(self) -> tuple[float, float, float, float, float, float]:
         df_return = self.save_portfolio_return_memory()
-        daily_return = df_return.daily_return.values
         df_value = self.save_asset_memory()
-        assets = df_value["total assets"].values
-        df = pd.DataFrame()
-        df["daily_return"] = daily_return
-        df["total assets"] = assets
-        return self.evaualte(df)
-
-    def get_daily_return_rate(self,price_list:list):
-        return_rate_list=[]
-        for i in range(len(price_list)-1):
-            return_rate=(price_list[i+1]/price_list[i])-1
-            return_rate_list.append(return_rate)
-        return return_rate_list
         
+        df_eval = pd.DataFrame()
+        # Ensure columns exist before assigning, especially if memory lists are empty
+        df_eval["daily_return"] = df_return["daily_return"] if "daily_return" in df_return else pd.Series(dtype=np.float64)
+        df_eval["total assets"] = df_value["total assets"] if "total assets" in df_value else pd.Series(dtype=np.float64)
+        
+        if df_eval.empty or df_eval["total assets"].empty: # Handle empty data case
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            
+        return self.evaualte(df_eval)
 
-    def evaualte(self, df):
-        daily_return = df["daily_return"]
-        # print(df, df.shape, len(df),len(daily_return))
-        neg_ret_lst = df[df["daily_return"] < 0]["daily_return"]
-        tr = df["total assets"].values[-1] / (df["total assets"].values[0] + 1e-10) - 1
-        return_rate_list=self.get_daily_return_rate(df["total assets"].values)
+    def get_daily_return_rate(self, price_list: np.ndarray | list[float]) -> list[float]:
+        price_array = np.asarray(price_list, dtype=np.float32)
+        if len(price_array) < 2:
+            return []
+        safe_denominator = np.where(price_array[:-1] == 0, 1e-9, price_array[:-1]) # Replace 0 with small number
+        return_rates = (price_array[1:] / safe_denominator) - 1
+        return return_rates.tolist()
+        
+    def evaualte(self, df: pd.DataFrame) -> tuple[float, float, float, float, float, float]:
+        if df.empty or df["daily_return"].empty or df["total assets"].empty:
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 # Default values for empty df
 
-        sharpe_ratio = np.mean(return_rate_list)*(252)** 0.5 / (np.std(return_rate_list) + 1e-10)
-        vol = np.std(return_rate_list)
-        mdd = 0
-        peak=df["total assets"][0]
-        for value in df["total assets"]:
-            if value>peak:
-                peak=value
-            dd=(peak-value)/peak
-            if dd>mdd:
-                mdd=dd
-        cr = np.sum(daily_return) / (mdd + 1e-10)
-        sor = np.sum(daily_return) / (np.nan_to_num(np.std(neg_ret_lst),0) + 1e-10) / (np.sqrt(len(daily_return))+1e-10)
+        daily_return_series = df["daily_return"]
+        total_assets_series = df["total assets"]
+
+        neg_ret_series = daily_return_series[daily_return_series < 0]
+        
+        # Total return
+        initial_assets = total_assets_series.iloc[0]
+        final_assets = total_assets_series.iloc[-1]
+        tr = final_assets / (initial_assets + 1e-10) - 1 
+        return_rate_list_for_sharpe_vol = self.get_daily_return_rate(total_assets_series.values)
+
+        if not return_rate_list_for_sharpe_vol:
+            sharpe_ratio = 0.0
+            vol = 0.0
+        else:
+            mean_return = np.mean(return_rate_list_for_sharpe_vol)
+            std_return = np.std(return_rate_list_for_sharpe_vol)
+            sharpe_ratio = mean_return * (252 ** 0.5) / (std_return + 1e-10)
+            vol = std_return
+        
+        # Max Drawdown
+        mdd = 0.0
+        if not total_assets_series.empty:
+            peak = total_assets_series.iloc[0]
+            for value in total_assets_series:
+                if value > peak:
+                    peak = value
+                dd = (peak - value) / peak if peak > 1e-9 else 0.0 
+                if dd > mdd:
+                    mdd = dd
+        
+        sum_daily_returns = np.sum(daily_return_series.values)
+        
+        # Calmar Ratio
+        cr = sum_daily_returns / (mdd + 1e-10) if (mdd > 1e-9 or sum_daily_returns !=0) else 0.0 # Avoid 0/0
+        
+        # Sortino Ratio
+        std_neg_ret = np.std(neg_ret_series.values) if not neg_ret_series.empty else 0.0
+        len_daily_return_sqrt = np.sqrt(len(daily_return_series)) if len(daily_return_series) > 0 else 0.0
+        
+        denominator_sor = (np.nan_to_num(std_neg_ret, nan=0.0) + 1e-10) * (len_daily_return_sqrt + 1e-10)
+        sor = sum_daily_returns / denominator_sor if denominator_sor > 1e-9 else 0.0
+        
         return tr, sharpe_ratio, vol, mdd, cr, sor
