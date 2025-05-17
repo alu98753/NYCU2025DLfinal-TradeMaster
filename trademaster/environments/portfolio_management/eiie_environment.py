@@ -51,7 +51,7 @@ class PortfolioManagementEIIEEnvironment(Environments):
         else:
             self.df = pd.read_csv(self.df_path, index_col=0)
 
-        self.stock_dim = len(self.df.tic.unique())
+        self.stock_dim = len(self.df.tic.unique()) #49
         self.state_space_shape = self.stock_dim
         self.action_space_shape = self.stock_dim
         self.time_steps = time_steps
@@ -66,15 +66,24 @@ class PortfolioManagementEIIEEnvironment(Environments):
                    self.state_space_shape,
                    self.time_steps))
 
-        self.action_dim = self.action_space.shape[0]
-        self.state_dim = self.observation_space.shape[0]
+        self.action_dim = self.action_space.shape[0] #49
+        self.state_dim = self.observation_space.shape[0] #12
+
+        # print('self.df', self.df.shape)
 
         self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :]
+
+        # print('self.data', self.data.shape)
+
+        # print('1', self.data.shape)
+        print(self.data.tic.unique())
         self.state = np.array([[
             self.data[self.data.tic == tic][tech].values.tolist()
             for tech in self.tech_indicator_list
         ] for tic in self.data.tic.unique()])
+        # print('2', self.state.shape)
         self.state = np.transpose(self.state, (0, 2, 1))
+        # print('3', self.state.shape)
 
         self.terminal = False
         self.portfolio_value = self.initial_amount
@@ -86,15 +95,47 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.test_id = 'agent'
 
     def reset(self):
+
+        all_tics = self.df['tic'].unique()
+
+        template_df = pd.DataFrame({
+            'tic': all_tics
+        })
+
         self.day = self.time_steps - 1
+        #print('day', self.day)
         self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :]
-        # initially, the self.state's shape is stock_dim*len(tech_indicator_list)
+        #print('data', self.data)
+
+        self.data = pd.merge(template_df, self.data, on='tic', how='left')
+        self.data = self.data.ffill().bfill()
+        '''
+        #print('tic', self.data.tic.unique())
         self.state = np.array([[
             self.data[self.data.tic == tic][tech].values.tolist()
             for tech in self.tech_indicator_list
         ] for tic in self.data.tic.unique()])
+        print('state', self.state.shape)
+        '''
+        expected_length = self.time_steps
+        all_tics = self.data.tic.unique()
+
+        # 重新建立 self.state，確保每個 tic 的技術指標都是 time_steps 長度
+        self.state = np.array([
+            [
+                self.data[self.data.tic == tic][tech].values[-expected_length:].tolist()
+                if len(self.data[self.data.tic == tic]) >= expected_length 
+                else [0] * expected_length
+                for tech in self.tech_indicator_list
+            ]
+            for tic in all_tics
+        ])
+
+
         self.state = np.transpose(self.state, (0, 2, 1))
         # self.state = np.transpose(self.state, (2, 0, 1))
+
+
         self.terminal = False
         self.portfolio_value = self.initial_amount
         self.asset_memory = [self.initial_amount]
@@ -149,18 +190,56 @@ class PortfolioManagementEIIEEnvironment(Environments):
             return self.state, 0, self.terminal, {"sharpe_ratio": sharpe_ratio,"total_assets": assets}
 
         else:  # directly use the process of
+            all_tics = self.df['tic'].unique()
+
+            template_df = pd.DataFrame({
+                'tic': all_tics
+            })
+
             self.weights_memory.append(weights)
             last_day_memory = self.df.loc[self.day, :]
+            last_day_memory = pd.merge(template_df, last_day_memory, on='tic', how='left')
+            last_day_memory = last_day_memory.ffill().bfill()  # 前向填補和後向填補
+
             self.day += 1
             self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :]
+
+            self.data = pd.merge(template_df, self.data, on='tic', how='left')
+            self.data = self.data.ffill().bfill()
+
+            #print(self.df.tic.unique())
+            '''
             self.state = np.array([[
                 self.data[self.data.tic == tic][tech].values.tolist()
                 for tech in self.tech_indicator_list
             ] for tic in self.data.tic.unique()])
+            '''
+
+            expected_length = self.time_steps
+            all_tics = self.data.tic.unique()
+
+            # 重新建立 self.state，確保每個 tic 的技術指標都是 time_steps 長度
+            self.state = np.array([
+                [
+                    self.data[self.data.tic == tic][tech].values[-expected_length:].tolist()
+                    if len(self.data[self.data.tic == tic]) >= expected_length 
+                    else [0] * expected_length
+                    for tech in self.tech_indicator_list
+                ]
+                for tic in all_tics
+            ])
+            
             self.state = np.transpose(self.state, (0, 2, 1))
+            #print(self.state.shape)
+
 
             # self.state = np.transpose(self.state, (2, 0, 1))
+           
             new_price_memory = self.df.loc[self.day, :]
+            new_price_memory = pd.merge(template_df, new_price_memory, on='tic', how='left')
+            new_price_memory = new_price_memory.ffill().bfill()  # 前向填補和後向填補
+            # print('new_price_memory', new_price_memory.shape)
+
             portfolio_weights = weights[1:]
             portfolio_return = sum(
                 ((new_price_memory.close.values / last_day_memory.close.values)
