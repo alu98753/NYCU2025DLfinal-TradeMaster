@@ -1,6 +1,6 @@
 trainer = dict(
     type = "PortfolioManagementEIIETrainer",
-    epochs = 10,
+    epochs = 100,
     work_dir = "work_dir",
     if_remove = True,
 )

@@ -4,10 +4,12 @@ from collections import namedtuple
 @TRANSITIONS.register_module()
 def Transition():
     return namedtuple("Transition", ['state',
+                                     'prev_action',
                                      'action',
                                      'reward',
                                      'undone',
-                                     'next_state'])
+                                     'next_state', 
+                                     'price_ratios'])
 
 @TRANSITIONS.register_module()
 def TransitionPD():

@@ -26,12 +26,14 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.test_dynamic=int(get_attr(kwargs, "test_dynamic", "-1"))
         self.task_index = int(get_attr(kwargs, "task_index", "-1"))
         self.work_dir = get_attr(kwargs, "work_dir", "")
-        time_steps = get_attr(self.dataset, "time_steps", 10)
+        time_steps = get_attr(self.dataset, "time_steps", 50)
         self.day = time_steps - 1
+        self.train_flag = 0
 
         self.df_path = None
         if self.task.startswith("train"):
             self.df_path = get_attr(self.dataset, "train_path", None)
+            self.train_flag = 1
         elif self.task.startswith("valid"):
             self.df_path = get_attr(self.dataset, "valid_path", None)
         else:
@@ -55,7 +57,7 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.state_space_shape = self.stock_dim
         self.action_space_shape = self.stock_dim
         self.time_steps = time_steps
-
+        # print(f"env timesteps:{time_steps}")
         self.action_space = spaces.Box(low=-5,
                                        high=5,
                                        shape=(self.action_space_shape,))
@@ -70,11 +72,24 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.state_dim = self.observation_space.shape[0]
 
         self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :]
-        self.state = np.array([[
-            self.data[self.data.tic == tic][tech].values.tolist()
-            for tech in self.tech_indicator_list
-        ] for tic in self.data.tic.unique()])
-        self.state = np.transpose(self.state, (0, 2, 1))
+        self.state = np.zeros((len(self.tech_indicator_list), self.stock_dim, self.time_steps))
+
+        for j, tic in enumerate(self.data.tic.unique()):
+            for i, tech in enumerate(self.tech_indicator_list):
+                series = self.data[self.data.tic == tic][tech].values
+                series = pd.Series(series).ffill().bfill().values
+                if len(series) < self.time_steps:
+                    series = np.pad(series, (self.time_steps - len(series), 0), mode='edge')
+                else:
+                    series = series[-self.time_steps:]
+
+                self.state[i, j] = series
+        # self.state = np.array([[
+        #     self.data[self.data.tic == tic][tech].values.tolist()
+        #     for tech in self.tech_indicator_list
+        # ] for tic in self.data.tic.unique()])
+        # print("[DEBUG] state shape before transpose:", self.state.shape)
+        self.state = np.transpose(self.state, (1, 2, 0))
 
         self.terminal = False
         self.portfolio_value = self.initial_amount
@@ -84,16 +99,23 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.date_memory = [self.data.date.unique()[0]]
         self.transaction_cost_memory = []
         self.test_id = 'agent'
-
+    def _build_state_tensor(self, data_slice):
+        state = np.zeros((len(self.tech_indicator_list), self.stock_dim, self.time_steps))
+        for j, tic in enumerate(data_slice.tic.unique()):
+            for i, tech in enumerate(self.tech_indicator_list):
+                series = data_slice[data_slice.tic == tic][tech].values
+                series = pd.Series(series).ffill().bfill().values
+                if len(series) < self.time_steps:
+                    series = np.pad(series, (self.time_steps - len(series), 0), mode='edge')
+                else:
+                    series = series[-self.time_steps:]
+                state[i, j] = series
+        return np.transpose(state, (1, 2, 0))
     def reset(self):
         self.day = self.time_steps - 1
         self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :]
         # initially, the self.state's shape is stock_dim*len(tech_indicator_list)
-        self.state = np.array([[
-            self.data[self.data.tic == tic][tech].values.tolist()
-            for tech in self.tech_indicator_list
-        ] for tic in self.data.tic.unique()])
-        self.state = np.transpose(self.state, (0, 2, 1))
+        self.state = self._build_state_tensor(self.data)
         # self.state = np.transpose(self.state, (2, 0, 1))
         self.terminal = False
         self.portfolio_value = self.initial_amount
@@ -112,8 +134,10 @@ class PortfolioManagementEIIEEnvironment(Environments):
         weights = np.array(weights)
 
         if self.terminal:
+            print("something has done")
             if self.task.startswith("test_dynamic"):
                 print(f'Date from {self.start_date} to {self.end_date}')
+            
             tr, sharpe_ratio, vol, mdd, cr, sor = self.analysis_result()
             stats = OrderedDict(
                 {
@@ -146,25 +170,28 @@ class PortfolioManagementEIIEEnvironment(Environments):
                 with open(metric_save_path, 'wb') as handle:
                     pickle.dump(save_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-            return self.state, 0, self.terminal, {"sharpe_ratio": sharpe_ratio,"total_assets": assets}
+            return self.state, 0, self.terminal, {"sharpe_ratio": sharpe_ratio,"total_assets": assets}, 1
 
         else:  # directly use the process of
             self.weights_memory.append(weights)
             last_day_memory = self.df.loc[self.day, :]
             self.day += 1
             self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :]
-            self.state = np.array([[
-                self.data[self.data.tic == tic][tech].values.tolist()
-                for tech in self.tech_indicator_list
-            ] for tic in self.data.tic.unique()])
-            self.state = np.transpose(self.state, (0, 2, 1))
+            self.state = self._build_state_tensor(self.data)
 
             # self.state = np.transpose(self.state, (2, 0, 1))
             new_price_memory = self.df.loc[self.day, :]
             portfolio_weights = weights[1:]
-            portfolio_return = sum(
-                ((new_price_memory.close.values / last_day_memory.close.values)
-                 - 1) * portfolio_weights)
+            portfolio_return = sum(((new_price_memory.close.values / last_day_memory.close.values) - 1) * portfolio_weights)
+            if self.day < len(self.df.index.unique()) - 1 :
+                temp = self.day+1
+            else :
+                temp = self.day
+            next_day_price_memory = self.df.loc[temp, :] ## price
+            price_rate = 1
+            if self.train_flag == 1:
+                price_rate = (next_day_price_memory.close.values / new_price_memory.close.values) 
+
             weights_brandnew = self.normalization([weights[0]] + list(
                 np.array(weights[1:]) *
                 np.array((new_price_memory.close.values /
@@ -176,21 +203,25 @@ class PortfolioManagementEIIEEnvironment(Environments):
             diff_weights = np.sum(
                 np.abs(np.array(weights_old) - np.array(weights_new)))
             transcationfee = diff_weights * self.transaction_cost_pct * self.portfolio_value
-            new_portfolio_value = (self.portfolio_value -
-                                   transcationfee) * (1 + portfolio_return)
+            # new_portfolio_value = (self.portfolio_value -
+            #                        transcationfee) * (1 + portfolio_return)
+            new_portfolio_value = max(1.0, (self.portfolio_value - transcationfee) * (1 + portfolio_return))
             portfolio_return = (new_portfolio_value -
                                 self.portfolio_value) / self.portfolio_value
-            self.reward = np.log(new_portfolio_value) - np.log(
-                self.portfolio_value)
+            if self.portfolio_value > 0 and new_portfolio_value > 0:
+                self.reward = np.log(new_portfolio_value) - np.log(self.portfolio_value)
+            else:
+                self.reward = 0.0
+            # self.reward = np.log(new_portfolio_value) - np.log(self.portfolio_value)
             self.portfolio_value = new_portfolio_value
-
+            # print(self.reward)
             self.portfolio_return_memory.append(portfolio_return)
             self.date_memory.append(self.data.date.unique()[-1])
             self.asset_memory.append(new_portfolio_value)
 
             self.reward = self.reward
 
-        return self.state, self.reward, self.terminal, {"weights_brandnew":weights_brandnew}
+        return self.state, self.reward, self.terminal, {"weights_brandnew":weights_brandnew}, price_rate
 
     def normalization(self, actions):
         # a normalization function not only for actions to transfer into weights but also for the weights of the
@@ -229,6 +260,7 @@ class PortfolioManagementEIIEEnvironment(Environments):
     def analysis_result(self):
         # A simpler API for the environment to analysis itself when coming to terminal
         df_return = self.save_portfolio_return_memory()
+        # print(f"df_return {df_return}")
         daily_return = df_return.daily_return.values
         df_value = self.save_asset_memory()
         assets = df_value["total assets"].values
@@ -240,8 +272,13 @@ class PortfolioManagementEIIEEnvironment(Environments):
     def get_daily_return_rate(self,price_list:list):
         return_rate_list=[]
         for i in range(len(price_list)-1):
-            return_rate=(price_list[i+1]/price_list[i])-1
-            return_rate_list.append(return_rate)
+            # return_rate=(price_list[i+1]/price_list[i])-1
+            # return_rate_list.append(return_rate)
+            if price_list[i] == 0 or np.isnan(price_list[i]) or np.isnan(price_list[i+1]):
+                return_rate_list.append(0.0)  # or continue
+            else:
+                return_rate = (price_list[i+1] / price_list[i]) - 1
+                return_rate_list.append(return_rate)
         return return_rate_list
         
 
@@ -249,9 +286,11 @@ class PortfolioManagementEIIEEnvironment(Environments):
         daily_return = df["daily_return"]
         # print(df, df.shape, len(df),len(daily_return))
         neg_ret_lst = df[df["daily_return"] < 0]["daily_return"]
+        # print(f"ned_ret_lst :{neg_ret_lst}")
         tr = df["total assets"].values[-1] / (df["total assets"].values[0] + 1e-10) - 1
         return_rate_list=self.get_daily_return_rate(df["total assets"].values)
-
+        # print(f"tr :{tr}")
+        # print(f"return_rate_list :{return_rate_list}")
         sharpe_ratio = np.mean(return_rate_list)*(252)** 0.5 / (np.std(return_rate_list) + 1e-10)
         vol = np.std(return_rate_list)
         mdd = 0

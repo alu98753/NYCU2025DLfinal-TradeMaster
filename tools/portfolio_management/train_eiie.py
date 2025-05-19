@@ -81,6 +81,7 @@ def main():
     dataset = build_dataset(cfg)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(device)
 
     train_environment = build_environment(cfg, default_args=dict(dataset=dataset, task="train"))
     valid_environment = build_environment(cfg, default_args=dict(dataset=dataset, task="valid"))
@@ -99,10 +100,13 @@ def main():
 
     cfg.act.update(dict(input_dim=input_dim, time_steps=time_steps))
     cfg.cri.update(dict(input_dim=input_dim, action_dim= action_dim, time_steps=time_steps))
-
-    act = build_net(cfg.act)
-    cri = build_net(cfg.cri)
-
+    # act = build_net(cfg.act, default_args=dict(device=device))
+    # cri = build_net(cfg.cri, default_args=dict(device=device))
+    act = build_net(cfg.act).to(device)
+    cri = build_net(cfg.cri).to(device)
+    
+    print("✅ act model device:", next(act.parameters()).device)
+    print("✅ cri model device:", next(cri.parameters()).device)
     work_dir = os.path.join(ROOT, cfg.trainer.work_dir)
 
     if not os.path.exists(work_dir):

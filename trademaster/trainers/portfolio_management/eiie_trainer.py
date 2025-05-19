@@ -44,7 +44,7 @@ class PortfolioManagementEIIETrainer(Trainer):
 
         if self.if_off_policy:  # off-policy
             self.batch_size = int(get_attr(kwargs, "batch_size", 64))
-            self.horizon_len = int(get_attr(kwargs, "horizon_len", 512))
+            self.horizon_len = int(get_attr(kwargs, "horizon_len", 1024))## added 512 -> 1024
             self.buffer_size = int(get_attr(kwargs, "buffer_size", 1000))
         else:  # on-policy
             self.batch_size = int(get_attr(kwargs, "batch_size", 128))
@@ -116,6 +116,8 @@ class PortfolioManagementEIIETrainer(Trainer):
         assert state.shape == (self.num_envs, self.action_dim, self.time_steps, self.state_dim,)
         assert isinstance(state, torch.Tensor)
         self.agent.last_state = state.detach()
+        print("📌 agent.act device (train):", next(self.agent.act.parameters()).device)
+        print("📌 agent.cri device (train):", next(self.agent.cri.parameters()).device)
 
         '''init buffer'''
         if self.if_off_policy:
@@ -144,6 +146,7 @@ class PortfolioManagementEIIETrainer(Trainer):
 
             torch.set_grad_enabled(True)
             logging_tuple = self.agent.update_net(buffer)
+            print(f"[Epoch {epoch}] TD Loss: {logging_tuple[0]:.6f}, Avg Q: {logging_tuple[1]:.6f}")
             torch.set_grad_enabled(False)
 
             if torch.mean(buffer_items.undone) < 1.0:

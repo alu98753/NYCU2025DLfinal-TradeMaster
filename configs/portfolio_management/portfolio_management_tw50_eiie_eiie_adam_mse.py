@@ -1,5 +1,5 @@
 task_name = "portfolio_management"
-dataset_name = "dj30"
+dataset_name = "tw50"
 net_name = "eiie"
 agent_name = "eiie"
 optimizer_name = "adam"
@@ -13,22 +13,22 @@ _base_ = [
     f"../_base_/trainers/{task_name}/eiie_trainer.py",
     f"../_base_/losses/{loss_name}.py",
     f"../_base_/optimizers/{optimizer_name}.py",
-    f"../_base_/nets/{net_name}.py",
+    f"../_base_/nets/tw_eiie.py",
     f"../_base_/transition/transition.py"
 ]
 
 data = dict(
     type='PortfolioManagementDataset',
-    data_path='data/portfolio_management/dj30',
-    train_path='data/portfolio_management/dj30/train.csv',
-    valid_path='data/portfolio_management/dj30/valid.csv',
-    test_path='data/portfolio_management/dj30/test.csv',
-    test_dynamic_path='data/portfolio_management/dj30/test_with_label.csv',
+    data_path='data/portfolio_management/tw50',
+    train_path='data/portfolio_management/tw50/train.csv',
+    valid_path='data/portfolio_management/tw50/valid.csv',
+    test_path='data/portfolio_management/tw50/test.csv',
+    test_dynamic_path='data/portfolio_management/tw50/test_with_label.csv',
     tech_indicator_list=[
         'zopen', 'zhigh', 'zlow', 'zadjcp', 'zclose',
         'zd_5', 'zd_10', 'zd_15', 'zd_20', 'zd_25', 'zd_30'
     ],
-    length_day=10,
+    length_day=50,
     initial_amount=100000,
     transaction_cost_pct=0.001)
 
@@ -57,9 +57,9 @@ act = dict(
     type = "EIIEConv",
     input_dim = None,
     output_dim=1,
-    time_steps=10,
-    kernel_size=3,
-    dims = [32]  ## added [32]->[64]
+    time_steps=50,
+    kernel_size=[(1,3),(1,48)],
+    dims = [32,20]  ## added [32]->[64]
 )
 
 cri = dict(

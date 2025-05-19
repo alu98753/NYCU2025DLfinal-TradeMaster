@@ -12,7 +12,7 @@ class EIIEConv(Net):
                  output_dim = 1,
                  time_steps = 10,
                  kernel_size = 3,
-                 dims = (32, )):
+                 dims = (32, )):##added
         super(EIIEConv, self).__init__()
 
         self.kernel_size = kernel_size
@@ -20,7 +20,7 @@ class EIIEConv(Net):
 
         self.net = build_conv2d(
             dims=[input_dim, *dims, output_dim],
-            kernel_size=[(1, self.kernel_size), (1, self.time_steps - self.kernel_size + 1)]
+            kernel_size=[(1, self.kernel_size), (1, self.time_steps - self.kernel_size + 1)]## added 中間 (1, self.kernel_size) 扣掉 (1, self.time_steps - self.kernel_size + 1)
         )
         self.para = torch.nn.Parameter(torch.ones(1).requires_grad_())
 
@@ -49,7 +49,7 @@ class EIIECritic(Net):
         super(EIIECritic, self).__init__()
 
         self.time_steps = time_steps
-
+        self.dropout = nn.Dropout(0.3)##added
         self.lstm = nn.LSTM(input_size=input_dim * time_steps,
                             hidden_size=hidden_size,
                             num_layers=num_layers,
@@ -66,7 +66,7 @@ class EIIECritic(Net):
         x = self.linear1(lstm_out)
 
         x = self.act(x)
-
+        x = self.dropout(x)#added
         x = x.view(x.shape[0], -1)
         para = self.para.repeat(x.shape[0], 1)
 

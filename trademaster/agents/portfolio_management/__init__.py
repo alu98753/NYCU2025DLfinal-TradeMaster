@@ -1,3 +1,4 @@
 from .deeptrader import PortfolioManagementDeepTrader
-from .eiie import PortfolioManagementEIIE
+# from .eiie import PortfolioManagementEIIE
 from .investor_imitator import PortfolioManagementInvestorImitator
+from .tw50_eiie import PortfolioManagementEIIE

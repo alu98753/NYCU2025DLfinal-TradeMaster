@@ -19,14 +19,13 @@ from trademaster.utils import get_attr, GeneralReplayBuffer, get_optim_param
 class PortfolioManagementEIIE(AgentBase):
     def __init__(self, **kwargs):
         super(PortfolioManagementEIIE, self).__init__()
-
         self.num_envs = int(get_attr(kwargs, "num_envs", 1))
         self.device = get_attr(kwargs, "device", torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu"))
         self.max_step = get_attr(kwargs, "max_step",
                                  12345)  # the max step number of an episode. 'set as 12345 in default.
         self.action_dim = get_attr(kwargs, "action_dim", None)
         self.state_dim = get_attr(kwargs, "state_dim", None)
-        self.time_steps = get_attr(kwargs, "time_steps", 10)
+        self.time_steps = get_attr(kwargs, "time_steps", 50)
 
         '''Arguments for reward shaping'''
         self.gamma = get_attr(kwargs, "gamma", 0.99)  # discount factor of future rewards
@@ -84,6 +83,8 @@ class PortfolioManagementEIIE(AgentBase):
         get_action = self.act
         for t in range(horizon_len):
             action = get_action(state.unsqueeze(0))
+            action = action + torch.randn_like(action) * 0.01#added
+            action = torch.clamp(action, 0, 1)  # added
             states[t] = state
 
             ary_action = action[0].detach().cpu().numpy()
