@@ -56,7 +56,7 @@ set_seed(2023)
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Download Alpaca Datasets')
-    parser.add_argument("--config", default=osp.join(ROOT, "configs", "portfolio_management", "portfolio_management_dj30_eiie_eiie_adam_mse.py"),
+    parser.add_argument("--config", default=osp.join(ROOT, "configs", "portfolio_management", "portfolio_management_tw50_eiie_eiie_adam_mse.py"),
                         help="download datasets config file path")
     parser.add_argument("--task_name", type=str, default="train")
     parser.add_argument("--test_dynamic", type=str, default="-1")
@@ -79,12 +79,17 @@ def main():
         print(cfg)
 
     dataset = build_dataset(cfg)
-
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    # print('one')
     train_environment = build_environment(cfg, default_args=dict(dataset=dataset, task="train"))
+    # print('two')
     valid_environment = build_environment(cfg, default_args=dict(dataset=dataset, task="valid"))
+    # print('three')
     test_environment = build_environment(cfg, default_args=dict(dataset=dataset, task="test"))
+    # print('four')
+
     if task_name.startswith("dynamics_test"):
         test_dynamic_environments = []
         for i, path in enumerate(dataset.test_dynamic_paths):

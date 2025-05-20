@@ -5,6 +5,7 @@ ROOT = str(Path(__file__).resolve().parents[2])
 sys.path.append(ROOT)
 
 pretrained = dict(
-    sarl_encoder = os.path.join(ROOT, "trademaster", "pretrained", "sarl_encoder", "LSTM.pth"),
+    # sarl_encoder = os.path.join(ROOT, "trademaster", "pretrained", "sarl_encoder", "LSTM.pth"),
+    sarl_encoder = os.path.join(ROOT, "trademaster", "pretrained", "sarl_encoder", "tw50_LSTM.pth"),
     investor_imitator = os.path.join(ROOT, "trademaster", "pretrained", "logic_discriptor"),
 )

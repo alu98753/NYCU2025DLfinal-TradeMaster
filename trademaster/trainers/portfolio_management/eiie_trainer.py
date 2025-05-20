@@ -53,7 +53,9 @@ class PortfolioManagementEIIETrainer(Trainer):
         self.epochs = int(get_attr(kwargs, "epochs", 20))
 
         self.state_dim = self.agent.state_dim
+        #print('state_dim', self.state_dim)
         self.action_dim = self.agent.action_dim
+        #print('action_dim', self.action_dim)
         self.time_steps = self.agent.time_steps
         self.transition = self.agent.transition
 
@@ -102,9 +104,26 @@ class PortfolioManagementEIIETrainer(Trainer):
             os.makedirs(self.checkpoints_path, exist_ok=True)
 
     def train_and_valid(self):
-
+        
         '''init agent.last_state'''
         state = self.train_environment.reset()
+
+        #print(f"State shape: {state.shape}")
+        #print(f"Expected shape: ({self.action_dim}, {self.time_steps}, {self.state_dim})")
+
+        if state.shape[0] < self.action_dim:
+            # 建立補零的 Tensor，填滿的部分用 0
+            padding = torch.zeros((self.action_dim - state.shape[0], self.time_steps, self.state_dim), dtype=torch.float32)
+    
+            # 先將 state 轉成 Tensor 來做 concat，之後再轉回 numpy
+            state = torch.cat((torch.tensor(state, dtype=torch.float32), padding), dim=0)
+    
+            # 最後轉回 numpy 陣列
+            state = state.numpy()
+            #print(f"State shape after padding: {state.shape}")
+            #print(f"State type after padding: {type(state)}")
+
+    
         if self.num_envs == 1:
             assert state.shape == (self.action_dim, self.time_steps, self.state_dim,)
             assert isinstance(state, np.ndarray)
@@ -160,7 +179,7 @@ class PortfolioManagementEIIETrainer(Trainer):
                     state, reward, done, save_dict = self.valid_environment.step(action)
                     episode_reward_sum += reward
                     if done:
-                        #print("Valid Episode Reward Sum: {:04f}".format(episode_reward_sum))
+                        print("Valid Episode Reward Sum: {:04f}".format(episode_reward_sum))
                         break
                 valid_score_list.append(episode_reward_sum)
                 save_dict_list.append(save_dict)
