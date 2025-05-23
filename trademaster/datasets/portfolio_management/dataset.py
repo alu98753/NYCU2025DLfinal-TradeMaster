@@ -9,6 +9,7 @@ from ..builder import DATASETS
 from trademaster.utils import get_attr
 import pandas as pd
 import os
+import torch
 
 @DATASETS.register_module()
 class PortfolioManagementDataset(CustomDataset):
@@ -63,6 +64,12 @@ class PortfolioManagementDataset(CustomDataset):
         self.length_day = get_attr(kwargs, "length_day", 10)
         self.transaction_cost_pct = get_attr(kwargs, "transaction_cost_pct", 0.001)
 
+        
+        ### not important , my modify to see data shape
+        self.data = pd.read_csv(self.train_path)
+        self.samples = self._build_samples()
+
+
     def get_styled_intervals_and_gives_new_index(self, data):
         index_by_tick_list = []
         index_by_tick = []
@@ -89,3 +96,26 @@ class PortfolioManagementDataset(CustomDataset):
         intervals.append([last_index, data.shape[0]])
         index_by_tick_list.append(index_by_tick)
         return intervals, index_by_tick_list
+
+    ### not important , my modify to see data shape
+    def _build_samples(self):
+        samples = []
+        for i in range(len(self.data) - self.length_day):
+            window = self.data.iloc[i:i+self.length_day]
+            obs = window[self.tech_indicator_list].values.astype('float32')
+            obs_tensor = torch.tensor(obs)
+            reward_tensor = torch.tensor([0.0])  # placeholder
+            done_flag = torch.tensor(False)
+            samples.append({
+                'obs': obs_tensor,
+                'reward': reward_tensor,
+                'done': done_flag,
+            })
+        return samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+    ### not important , my modify to see data shape

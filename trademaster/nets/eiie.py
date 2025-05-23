@@ -25,15 +25,25 @@ class EIIEConv(Net):
         self.para = torch.nn.Parameter(torch.ones(1).requires_grad_())
 
     def forward(self, x): # (batch_size, num_seqs, action_dim, time_steps, state_dim)
+        # print("--- EIIEConv.forward ---\n\n")
+        # print("Shape of x at EIIEConv input: ", x.shape)
         if len(x.shape) > 4:
             x = x.squeeze(1)
+            # print("Shape of x after squeeze: ", x.shape)
+
         x = x.permute(0, 3, 1, 2)
+        # print("Shape of x after permute: ", x.shape)
         x = self.net(x)
+        # print("Shape of x after net: ", x.shape)
         x = x.view(x.shape[0], -1)
+        # print("Shape of x after view: ", x.shape)
 
         para = self.para.repeat(x.shape[0], 1)
+        # print("Shape of para: ", para.shape)
         x = torch.cat((x, para), dim=1)
+        # print("Shape of x after cat: ", x.shape)
         x = torch.softmax(x, dim=1)
+        # print("Shape of x after softmax: ", x.shape)
         return x
 
 @NETS.register_module()
@@ -71,6 +81,6 @@ class EIIECritic(Net):
         para = self.para.repeat(x.shape[0], 1)
 
         x = torch.cat((x, para, a), dim=1)
-        # x = self.linear2(x)
+        x = self.linear2(x)
         x = x.mean(dim = 1, keepdim=True)
         return x

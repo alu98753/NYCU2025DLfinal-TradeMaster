@@ -22,6 +22,10 @@ class PortfolioManagementEIIEEnvironment(Environments):
         super(PortfolioManagementEIIEEnvironment, self).__init__()
 
         self.dataset = get_attr(kwargs, "dataset", None)
+        print("shape of a single sample['obs'] from Dataset", self.dataset[0]['obs'].shape)
+        print("shape of a single sample['reward'] from Dataset", self.dataset[0]['reward'].shape)
+        print("shape of a single sample['done'] from Dataset", self.dataset[0]['done'])
+        
         self.task = get_attr(kwargs, "task", "train")
         self.test_dynamic=int(get_attr(kwargs, "test_dynamic", "-1"))
         self.task_index = int(get_attr(kwargs, "task_index", "-1"))
@@ -194,7 +198,7 @@ class PortfolioManagementEIIEEnvironment(Environments):
             
             # For terminal state, return the last valid state that led to termination.
             # The current self.state is for day_idx, which is the terminal day.
-            return self.state.astype(np.float32), 0.0, self.terminal, {"sharpe_ratio": sharpe_ratio, "total_assets": assets_values}
+            return self.state.astype(np.float32), 0.0, self.terminal, save_dict
 
         else:
             self.weights_memory.append(weights.tolist()) # Store agent's target weights for this step

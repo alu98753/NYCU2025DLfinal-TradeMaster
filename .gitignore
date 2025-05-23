@@ -13,8 +13,11 @@
 /data_synthesis/timegan-pytorch/run.sh
 
 # add
+*.txt
 *.pyc
 *.csv
 *.pth
 *.pkl
 *.png
+*wandb
+settings*

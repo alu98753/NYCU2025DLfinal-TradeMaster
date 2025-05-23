@@ -13,7 +13,7 @@ import os
 import pandas as pd
 import random
 from collections import OrderedDict
-
+import wandb
 
 @TRAINERS.register_module()
 class PortfolioManagementEIIETrainer(Trainer):
@@ -74,7 +74,10 @@ class PortfolioManagementEIIETrainer(Trainer):
         self.verbose = get_attr(kwargs, "verbose", False)
 
         self.init_before_training()
-
+        
+        ### global data flow : trainer -> agent -> HCAR forward
+        self.global_step = 0
+    
     def init_before_training(self):
         random.seed(self.random_seed)
         torch.cuda.manual_seed(self.random_seed)
@@ -145,7 +148,7 @@ class PortfolioManagementEIIETrainer(Trainer):
                 max_size=self.buffer_size,
                 device=self.device,
             )
-            buffer_items = self.agent.explore_env(self.train_environment, self.horizon_len )
+            buffer_items = self.agent.explore_env(self.train_environment, self.horizon_len,self.global_step )
             buffer.update(buffer_items)
         else:
             buffer = []
@@ -155,14 +158,24 @@ class PortfolioManagementEIIETrainer(Trainer):
         epoch = 1
         print("Train Episode: [{}/{}]".format(epoch, self.epochs))
         while True:
-            buffer_items = self.agent.explore_env(self.train_environment, self.horizon_len)
+            buffer_items = self.agent.explore_env(self.train_environment, self.horizon_len,self.global_step)
+            # print("--- DataLoader Output / Agent Input ---\n\n")
+            
+            # print("Shape of batch['obs'] from DataLoader:",buffer_items.state.shape)
+            # print("Shape of batch['action'] from DataLoader:",buffer_items.action.shape)
+            # print("Shape of batch['reward'] from DataLoader:",buffer_items.reward.shape)
+            # print("Shape of batch['undone'] from DataLoader:",buffer_items.undone.shape)
+            # print("Shape of batch['next_state'] from DataLoader:",buffer_items.next_state.shape)
+            
             if self.if_off_policy:
                 buffer.update(buffer_items)
             else:
                 buffer[:] = buffer_items
 
             torch.set_grad_enabled(True)
-            logging_tuple = self.agent.update_net(buffer)
+            logging_tuple = self.agent.update_net(buffer,self.global_step)
+            self.global_step += 1
+
             torch.set_grad_enabled(False)
 
             if torch.mean(buffer_items.undone) < 1.0:
@@ -171,7 +184,12 @@ class PortfolioManagementEIIETrainer(Trainer):
                 episode_reward_sum = 0.0  # sum of rewards in an episode
                 get_action = self.agent.act
                 while True:
+                    # print("--- Agent.explore_env ---\n\n")
+                    # print("Shape of state before unsqueeze:",state.shape)
+                    
                     tensor_state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    # print("Shape of x  after unsqueeze (input to EIIEConv):",tensor_state.shape)
+                    
                     tensor_action = get_action(tensor_state)
                     if self.if_discrete:
                         tensor_action = tensor_action.argmax(dim=1)
@@ -180,6 +198,38 @@ class PortfolioManagementEIIETrainer(Trainer):
                     episode_reward_sum += reward
                     if done:
                         print("Valid Episode Reward Sum: {:04f}".format(episode_reward_sum))
+                        # 從 save_dict 或 valid_environment 中獲取更詳細的指標
+                        # save_dict 包含這些指標
+                        '''
+                        save_dict = OrderedDict(
+                            {
+                                "Profit Margin": tr * 100,
+                                "Excess Profit": tr * 100 - 0,
+                                "daily_return": daily_return_values,
+                                "total_assets": assets_values
+                            }
+                        )
+                        '''
+                        # 為了獲取完整的8個指標，最好是調用環境的 analysis_result
+                        current_metrics = self.valid_environment.analysis_result() # (tr, sharpe, vol, mdd, cr, sor)
+                        # print("save dict keys:",list(save_dict.keys()))
+                        wandb.log({
+                            "Valid Reward Sum": episode_reward_sum,
+                            "Validation/Profit_Margin": save_dict["Profit Margin"],
+                            "Validation/Excess_Profit": save_dict["Excess Profit"],
+                            "Validation/Daily_Return": save_dict["daily_return"],
+                            "Validation/Total_Assets": save_dict["total_assets"],
+                            "Validation/Total_Return": round(current_metrics[0]*100, 2),
+                            "Validation/Sharpe_Ratio": round(current_metrics[1], 4),
+                            "Validation/Volatility": round(current_metrics[2]*100, 2),
+                            "Validation/Max_Drawdown": round(current_metrics[3]*100, 2),
+                            "Validation/Calmar_Ratio": round(current_metrics[4], 4),
+                            "Validation/Sortino_Ratio": round(current_metrics[5], 4),
+                            "agent_step": self.agent.optimizer_steps  # 使用 epoch 作為 x 軸
+                            # ENT, ENB 需要額外計算
+                        }, step= self.agent.optimizer_steps)
+                        ### log
+                        
                         break
                 valid_score_list.append(episode_reward_sum)
                 save_dict_list.append(save_dict)

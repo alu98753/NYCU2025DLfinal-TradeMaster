@@ -13,3 +13,6 @@ from .high_frequency_trading_dqn import HFTQNet
 from .titans import PositionalEncoding
 from .titans import TitansPortfolioActor
 from .titans import TitansPortfolioCritic
+
+from .HCAR import HCAR_Actor
+from .HCAR import HCAR_Critic

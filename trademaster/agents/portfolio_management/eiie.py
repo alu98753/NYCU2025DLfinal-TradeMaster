@@ -12,7 +12,7 @@ from ..custom import AgentBase
 import random
 from collections import namedtuple
 from trademaster.utils import get_attr, GeneralReplayBuffer, get_optim_param
-
+import wandb
 
 
 @AGENTS.register_module()
@@ -34,7 +34,7 @@ class PortfolioManagementEIIE(AgentBase):
                                      2 ** 0)  # an approximate target reward usually be closed to 256
         self.repeat_times = get_attr(kwargs, "repeat_times", 1.0)  # repeatedly update network using ReplayBuffer
         self.batch_size = int(get_attr(kwargs, "batch_size", 64))
-        self.clip_grad_norm = get_attr(kwargs, "clip_grad_norm", 3.0)  # clip the gradient after normalization
+        self.clip_grad_norm = get_attr(kwargs, "clip_grad_norm", 5.0)  # clip the gradient after normalization # origin: 3.0 # deeptrader 100.0
         self.soft_update_tau = get_attr(kwargs, "soft_update_tau",
                                         0)  # the tau of soft target update `net = (1-tau)*net + net1`
         self.state_value_tau = get_attr(kwargs, "state_value_tau", 5e-3)  # the tau of normalize for value and state
@@ -46,9 +46,49 @@ class PortfolioManagementEIIE(AgentBase):
         self.act_optimizer = get_attr(kwargs, "act_optimizer", None)
         self.cri_optimizer = get_attr(kwargs, "cri_optimizer", None)
 
+        # --- LR Scheduler 和 Warmup 初始化 ---
+        self.use_lr_scheduler = get_attr(kwargs, "use_lr_scheduler", False)
+        self.warmup_steps = int(get_attr(kwargs, "warmup_steps", 0))
+        
+        self.initial_lr_actor = self.act_optimizer.param_groups[0]['lr'] if self.act_optimizer else 0
+        self.initial_lr_critic = self.cri_optimizer.param_groups[0]['lr'] if self.cri_optimizer else 0
+        
+        self.optimizer_steps = 0 # 用於追蹤優化器更新的總步數
+
+        self.act_lr_scheduler = None
+        self.cri_lr_scheduler = None
+
+        if self.use_lr_scheduler and self.act_optimizer and self.cri_optimizer:
+            # 示例：Warmup 之後使用 CosineAnnealingLR 進行衰減
+            # lr_decay_scheduler_type = get_attr(kwargs, "lr_decay_scheduler_type", "CosineAnnealingLR")
+            # total_training_steps = get_attr(kwargs, "total_training_steps_for_scheduler", 50000) # 估算的總優化步數
+            
+            # 簡單起見，我們先只關注 Warmup，衰減部分可以後續添加
+            # 如果要添加衰減調度器，例如 CosineAnnealingLR：
+            # decay_t_max = total_training_steps - self.warmup_steps
+            # if decay_t_max > 0:
+            #     self.act_lr_scheduler = lr_scheduler.CosineAnnealingLR(self.act_optimizer, T_max=decay_t_max, eta_min=self.initial_lr_actor * 0.01)
+            #     self.cri_lr_scheduler = lr_scheduler.CosineAnnealingLR(self.cri_optimizer, T_max=decay_t_max, eta_min=self.initial_lr_critic * 0.01)
+            pass # 暫時不初始化衰減調度器，只做 warmup
+
         self.criterion = get_attr(kwargs, "criterion", None)
 
         self.transition = get_attr(kwargs, "transition", namedtuple("Transition", ['state','action','reward','undone','next_state']))
+
+    def _adjust_learning_rate(self, optimizer, initial_lr):
+        """手動調整學習率以實現 Warmup"""
+        if self.optimizer_steps < self.warmup_steps:
+            # 線性 warmup
+            lr_scale = float(self.optimizer_steps + 1) / float(self.warmup_steps) # 從 step 1 開始
+            current_lr = initial_lr * lr_scale
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = current_lr
+        elif self.optimizer_steps == self.warmup_steps: # Warmup 結束，恢復到初始(目標)LR
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = initial_lr
+        # else: Warmup 之後，如果配置了衰減調度器，則由衰減調度器負責
+        #       如果沒有配置衰減調度器，學習率將保持在 initial_lr
+
 
     def get_save(self):
         models = {
@@ -65,7 +105,7 @@ class PortfolioManagementEIIE(AgentBase):
         }
         return res
 
-    def explore_env(self, env, horizon_len: int) -> Tuple[Tensor, ...]:
+    def explore_env(self, env, horizon_len: int,global_step) -> Tuple[Tensor, ...]:
         states = torch.zeros((horizon_len,
                               self.num_envs,
                               self.action_dim,
@@ -108,18 +148,39 @@ class PortfolioManagementEIIE(AgentBase):
         )
         return transition
 
-    def update_net(self, buffer: GeneralReplayBuffer):
+    def update_net(self, buffer: GeneralReplayBuffer, global_step: int):
         obj_critics = 0.0
         obj_actors = 0.0
         update_times = int(buffer.add_size * self.repeat_times)
         assert update_times >= 1
         for _ in range(update_times):
-            obj_critic, q_value = self.get_obj_critic(buffer, self.batch_size)
+            # --- 在優化器 step 之前調整 LR (用於 Warmup) ---
+            if self.use_lr_scheduler:
+                if self.act_optimizer:
+                    self._adjust_learning_rate(self.act_optimizer, self.initial_lr_actor)
+                    wandb.log({"Learning_Rate/Actor_LR": self.act_optimizer.param_groups[0]['lr'], 
+                               "agent_step": self.optimizer_steps}, step=self.optimizer_steps) # 使用 optimizer_steps 作為 x 軸
+                if self.cri_optimizer:
+                    self._adjust_learning_rate(self.cri_optimizer, self.initial_lr_critic)
+                    wandb.log({"Learning_Rate/Critic_LR": self.cri_optimizer.param_groups[0]['lr'],
+                               "agent_step": self.optimizer_steps}, step=self.optimizer_steps)
+            obj_critic, q_value = self.get_obj_critic(buffer, self.batch_size,self.optimizer_steps)
+            # --- 在優化器 step 之後，如果配置了衰減調度器，則調用 scheduler.step() ---
+            # （注意：衰減調度器的 step 通常只在 warmup 之後執行）
+            # if self.use_lr_scheduler and self.optimizer_steps >= self.warmup_steps:
+            #     if self.act_lr_scheduler:
+            #         self.act_lr_scheduler.step()
+            #     if self.cri_lr_scheduler:
+            #         self.cri_lr_scheduler.step()
+            
+            self.optimizer_steps += 1 # 每次優化器更新後遞增總步數
+            
+            
             obj_critics += obj_critic.item()
             obj_actors += q_value.mean().item()
         return obj_critics / update_times, obj_actors / update_times
 
-    def get_obj_critic(self, buffer: GeneralReplayBuffer, batch_size: int) -> Tuple[Tensor, Tensor]:
+    def get_obj_critic(self, buffer: GeneralReplayBuffer, batch_size: int, global_step: int) -> Tuple[Tensor, Tensor]:
         """
         Calculate the loss of the network and predict Q values with **uniform sampling**.
 
@@ -134,12 +195,60 @@ class PortfolioManagementEIIE(AgentBase):
         undone = transition.undone
         next_state = transition.next_state
 
-        a = self.act(state)
+        a = self.act(state, global_step=self.optimizer_steps)
+        wandb.log({
+            "Action/Portfolio_Weights": wandb.Histogram(a.detach().cpu().numpy()),
+            "agent_step": self.optimizer_steps}, step=self.optimizer_steps)
         q = self.cri(state, a)
         a_loss = -torch.mean(q)
 
         self.act_optimizer.zero_grad()
         a_loss.backward()
+        # 在梯度裁剪前後都記錄，以觀察裁剪效果
+
+        ############## --- Log Actor (HCAR_Actor) Gradients ---
+        if self.optimizer_steps % 100 == 0: # Log every 100 optimizer steps
+            actor_grad_abs_means = {}
+            actor_grad_stds = {}
+            # Log for HCAR_Actor.temporal_feature_extractor.start_conv.weight (example)
+            # You need to access the specific layer you're interested in.
+            # For start_linear in RelationalContextIntegrator:
+            start_linear_layer = self.act.relational_context_integrator.start_linear
+            if start_linear_layer.weight.grad is not None:
+                actor_grad_abs_means["HCAR_Actor/3B_Relational/StartLinear_Weight_grad_AbsMean"] = start_linear_layer.weight.grad.abs().mean().item()
+                actor_grad_stds["HCAR_Actor/3B_Relational/StartLinear_Weight_grad_Std"] = start_linear_layer.weight.grad.std().item() # Using .std() directly, not .abs().std()
+            else:
+                actor_grad_abs_means["HCAR_Actor/3B_Relational/StartLinear_Weight_grad_AbsMean"] = 0
+                actor_grad_stds["HCAR_Actor/3B_Relational/StartLinear_Weight_grad_Std"] = 0
+
+            # Log overall Actor gradient norm (as you had before)
+            total_norm_act_before_clip = 0
+            for p in self.act.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm_act_before_clip += param_norm.item() ** 2
+            total_norm_act_before_clip = total_norm_act_before_clip ** 0.5
+            actor_grad_abs_means["Gradients/Actor_Grad_Norm_Before_Clip"] = total_norm_act_before_clip
+
+            # You can add more specific layer gradients here if needed
+            # Example: For the first TCN conv layer in TemporalFeatureExtractor
+            # first_tcn_conv = self.act.temporal_feature_extractor.tcn_blocks[0] # Assuming direct access
+            # if first_tcn_conv.weight.grad is not None:
+            #     actor_grad_abs_means["HCAR_Actor/3A_Temporal/TCN0_Conv_grad_AbsMean"] = first_tcn_conv.weight.grad.abs().mean().item()
+
+            wandb.log({**actor_grad_abs_means, **actor_grad_stds, "agent_step": self.optimizer_steps}, step=self.optimizer_steps)
+
+        if self.clip_grad_norm is not None:
+            torch.nn.utils.clip_grad_norm_(self.act.parameters(), self.clip_grad_norm)
+            # Optionally log Actor_Grad_Norm_After_Clip here        
+            total_norm_act_after_clip = 0
+            for p in self.act.parameters():
+                if p.grad is not None: # 裁剪後梯度仍然存在
+                    param_norm = p.grad.data.norm(2)
+                    total_norm_act_after_clip += param_norm.item() ** 2
+            total_norm_act_after_clip = total_norm_act_after_clip ** 0.5
+            wandb.log({"Gradients/Actor_Grad_Norm_After_Clip": total_norm_act_after_clip, "agent_step": self.optimizer_steps}, step=self.optimizer_steps)
+        ### 
         self.act_optimizer.step()
 
         a_ = self.act(next_state)
@@ -151,6 +260,35 @@ class PortfolioManagementEIIE(AgentBase):
 
         self.cri_optimizer.zero_grad()
         td_error.backward()
+        ### log
+        if self.cri_optimizer:
+            total_norm_cri_before_clip = 0
+            for p in self.cri.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm_cri_before_clip += param_norm.item() ** 2
+            total_norm_cri_before_clip = total_norm_cri_before_clip ** 0.5
+            wandb.log({"Gradients/Critic_Grad_Norm_Before_Clip": total_norm_cri_before_clip, "agent_step": self.optimizer_steps}, step=self.optimizer_steps)
+
+            if self.clip_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(self.cri.parameters(), self.clip_grad_norm)
+                total_norm_cri_after_clip = 0
+                for p in self.cri.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm_cri_after_clip += param_norm.item() ** 2
+                total_norm_cri_after_clip = total_norm_cri_after_clip ** 0.5
+                wandb.log({"Gradients/Critic_Grad_Norm_After_Clip": total_norm_cri_after_clip, "agent_step": self.optimizer_steps}, step=self.optimizer_steps)
+        ###
         self.cri_optimizer.step()
+
+        # --- 記錄損失 ---
+        # 假設 a_loss 是 actor loss, td_error 是 critic loss
+        wandb.log({
+            "Loss/Actor_Loss": -a_loss.item(), 
+            "Loss/Critic_Loss": td_error.item(),
+            "Values/Mean_Q_Value_from_buffer_action": q_eval.mean().item(), # 使用buffer中的action評估的Q值
+            "Values/Mean_Q_Value_from_current_policy_action": q.mean().item(), # 使用當前策略動作評估的Q值
+            "agent_step": self.optimizer_steps}, step=self.optimizer_steps)
 
         return td_error, q_target

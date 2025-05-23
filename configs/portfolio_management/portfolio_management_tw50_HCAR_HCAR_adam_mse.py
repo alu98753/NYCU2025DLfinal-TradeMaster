@@ -1,0 +1,103 @@
+task_name = "portfolio_management"
+dataset_name = "tw50"
+net_name = "HCAR"
+agent_name = "eiie"
+optimizer_name = "adam"
+loss_name = "mse"
+work_dir = f"work_dir/{task_name}_{dataset_name}_{net_name}_{agent_name}_{optimizer_name}_{loss_name}"
+
+_base_ = [
+    f"../_base_/datasets/{task_name}/{dataset_name}.py",
+    f"../_base_/environments/{task_name}/env.py",
+    f"../_base_/agents/{task_name}/{agent_name}.py",
+    f"../_base_/trainers/{task_name}/eiie_trainer.py",
+    f"../_base_/losses/{loss_name}.py",
+    f"../_base_/optimizers/{optimizer_name}.py",
+    f"../_base_/nets/{net_name}.py",
+    f"../_base_/transition/transition.py"
+]
+
+data = dict(
+    type='PortfolioManagementDataset',
+    data_path='data/portfolio_management/tw50',
+    train_path='data/portfolio_management/tw50/train.csv',
+    valid_path='data/portfolio_management/tw50/valid.csv',
+    test_path='data/portfolio_management/tw50/test.csv',
+    test_dynamic_path='data/portfolio_management/tw50/test_with_label.csv',
+    tech_indicator_list=[
+        'zopen', 'zhigh', 'zlow', 'zadjcp', 'zclose', # limitflag , check 擇一
+        'zd_5', 'zd_10', 'zd_15', 'zd_20', 'zd_25', 'zd_30'
+    ],
+    time_steps=20,
+    length_day=20,
+    initial_amount=100000,
+    transaction_cost_pct=0.001)
+
+environment = dict(type='PortfolioManagementEIIEEnvironment')
+transition = dict(
+    type = "Transition"
+)
+agent = dict(
+    type='PortfolioManagementEIIE',
+    memory_capacity=1000,
+    gamma=0.99,
+    policy_update_frequency=500,
+    # --- 新增 LR Scheduler 和 Warmup 相關參數 ---
+    use_lr_scheduler=True,          # 是否啟用學習率調度 (包含 warmup)
+    warmup_steps=50000,              # 預熱的優化器步數 (不是 epoch！)
+    initial_lr_actor = 0.0001,    # Actor 的目標學習率 (可以從 optimizer 配置中讀取)
+    initial_lr_critic = 0.0001,   # Critic 的目標學習率 (可以從 optimizer 配置中讀取)
+    lr_decay_scheduler_type = "CosineAnnealingLR", # 例如: "CosineAnnealingLR", "StepLR", "None"
+    decay_t_max = 50000,          # CosineAnnealingLR 的 T_max (總優化步數 - warmup_steps)
+    decay_step_size = 10000,      # StepLR 的 step_size
+    decay_gamma = 0.5,            # StepLR 的 gamma
+    )
+
+trainer = dict(
+    type='PortfolioManagementEIIETrainer',
+    epochs=30,
+    work_dir=work_dir,
+    if_remove=False )
+
+loss = dict(type='MSELoss')
+
+# optimizer = dict(type='Adam', lr=1e-6, weight_decay=1e-5) # 0.001
+optimizer = dict(type='Adam', lr=1e-6, weight_decay=1e-5) # 0.001 
+
+act = dict(
+    type="HCAR_Actor",
+    # num_original_features, num_stocks, window_len, supports 會在 train_eiie.py 動態填充
+
+    # 子模塊 3.A 參數
+    temporal_hidden_dim = 64,#64,
+    tcn_kernel_size = 2,
+    num_tcn_layers = 4, #3
+    temporal_dropout = 0.4, #0.3
+
+    # 子模塊 3.B 參數
+    relational_hidden_dim = 64, #64,
+    
+    num_gcn_layers = 0, #1, 2
+    relational_dropout = 0.0, #0.3
+    gcn_bool = False, 
+    
+    spatialattn_bool = False, 
+    addaptiveadj = False, # 先不用
+    
+    scoring_mlp_hidden_dims =  [32], # [32],或者 None
+    scoring_dropout = 0.0, #0.3
+    use_temporal_skip_to_scoring = True,
+    fusion_method_for_scoring = 'cat',
+
+    output_final_weights = True # 指示 HCAR_Actor 輸出最終權重
+)   
+
+cri = dict(
+    type = "HCAR_Critic",
+    input_dim = None,
+    action_dim = None,
+    output_dim=1,
+    time_steps=None,
+    num_layers = 3,
+    hidden_size=128
+)
