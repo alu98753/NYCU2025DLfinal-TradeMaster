@@ -3,7 +3,7 @@ act = dict(
     type = "EIIEConv",
     input_dim = None,
     output_dim=1,
-    time_steps=50,
+    time_steps=10,
     kernel_size=3,
     dims = [32,20]
 )

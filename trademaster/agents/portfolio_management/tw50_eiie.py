@@ -26,7 +26,7 @@ class PortfolioManagementEIIE(AgentBase):
                                  12345)  # the max step number of an episode. 'set as 12345 in default.
         self.action_dim = get_attr(kwargs, "action_dim", None)
         self.state_dim = get_attr(kwargs, "state_dim", None)
-        self.time_steps = get_attr(kwargs, "time_steps", 50)
+        self.time_steps = get_attr(kwargs, "time_steps", 10)
 
         '''Arguments for reward shaping'''
         self.gamma = get_attr(kwargs, "gamma", 0.99)  # discount factor of future rewards
@@ -137,9 +137,12 @@ class PortfolioManagementEIIE(AgentBase):
             # y_{t+1} 是下一期價格變動比例 → 要預先儲存在 buffer 或重算
             # 假設 reward = ln(mu * y · w_t) 已存在 transition.reward 中
             # 則 loss 就是：-reward
-            portfolio_return = torch.sum(0.9 *price_rate * stock_weights, dim=1)
-            log_return = torch.log(portfolio_return + 1e-10)
-            loss = -log_return.mean()
+            portfolio_return = torch.sum(0.99 *price_rate * stock_weights, dim=1)
+            # portfolio_return = torch.clamp(portfolio_return, min=-0.99, max=5.0)
+            log_return = torch.log(portfolio_return + 1)
+            entropy = -torch.sum(action * torch.log(action + 1e-10), dim=1).mean()
+            loss = -log_return.mean() - 0.001 * entropy
+            # loss = -log_return.mean()
 
             self.act_optimizer.zero_grad()
             loss.backward()

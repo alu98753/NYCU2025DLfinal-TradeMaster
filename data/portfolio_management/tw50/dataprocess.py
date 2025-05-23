@@ -117,14 +117,17 @@ tw50_df.to_csv('tw50.csv', index=False)
 
 # 分割資料集
 train_df = merged_df[(merged_df['date'].dt.year >= 2010) & (merged_df['date'].dt.year <= 2022)].copy()
+train_df.sort_values(by=['date', 'tic'], inplace=True)
 valid_df = merged_df[merged_df['date'].dt.year == 2023].copy()
+valid_df.sort_values(by=['date', 'tic'], inplace=True)
 test_df = merged_df[merged_df['date'].dt.year == 2024].copy()
+test_df.sort_values(by=['date', 'tic'], inplace=True)
 
 # 為每筆資料新增 time_id（根據 date 群組）
 def add_time_id(df, filename):
     df = df.copy()
     df.loc[:, 'date'] = pd.to_datetime(df['date'], errors='coerce')
-    df = df.sort_values(by='date')
+    df = df.sort_values(by=['date', 'tic'])
     df.loc[:, 'time_id'] = df.groupby('date').ngroup()
     cols = ['time_id'] + [col for col in df.columns if col != 'time_id']
     df = df[cols]

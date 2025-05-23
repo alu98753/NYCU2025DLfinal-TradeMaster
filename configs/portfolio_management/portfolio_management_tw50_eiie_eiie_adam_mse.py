@@ -28,7 +28,7 @@ data = dict(
         'zopen', 'zhigh', 'zlow', 'zadjcp', 'zclose',
         'zd_5', 'zd_10', 'zd_15', 'zd_20', 'zd_25', 'zd_30'
     ],
-    length_day=50,
+    length_day=10,
     initial_amount=100000,
     transaction_cost_pct=0.001)
 
@@ -38,27 +38,27 @@ transition = dict(
 )
 agent = dict(
     type='PortfolioManagementEIIE',
-    memory_capacity=10000, #added 1000->10000
+    memory_capacity=1000, #added 1000->10000
     gamma=0.99,
-    policy_update_frequency=10)#500->10
+    policy_update_frequency=500)#500->10
 
 trainer = dict(
     type='PortfolioManagementEIIETrainer',
-    epochs=100,##2
+    epochs=20,##2
     repeat_times=5,##added
     work_dir=work_dir,
     if_remove=False )
 
 loss = dict(type='MSELoss')
 
-optimizer = dict(type='Adam', lr=5e-4)##0.001
+optimizer = dict(type='Adam', lr=0.001)##0.001
 
 act = dict(
     type = "EIIEConv",
     input_dim = None,
     output_dim=1,
-    time_steps=50,
-    kernel_size=[(1,3),(1,48)],
+    time_steps=10,
+    kernel_size=[(1,3),(1,8)],
     dims = [32,20]  ## added [32]->[64]
 )
 

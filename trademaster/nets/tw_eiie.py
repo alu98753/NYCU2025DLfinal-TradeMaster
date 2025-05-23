@@ -22,7 +22,8 @@ class EIIEConv(Net):
         self.conv_layers = nn.Sequential(
             nn.Conv2d(input_dim, dims[0], kernel_size = kernel_size[0]),  # output: (32, 49, 48)
             nn.ReLU(),
-            nn.Conv2d(dims[0], dims[1], kernel_size= kernel_size[1])  # output: (20, 49, 1)
+            nn.Conv2d(dims[0], dims[1], kernel_size= kernel_size[1]),  # output: (20, 49, 1)
+            nn.ReLU()
         )
 
         # Additional input: previous action (1), added as 1 channel
@@ -42,7 +43,7 @@ class EIIEConv(Net):
         # print(f"[EIIEConv] prev_action.shape before view: {prev_action.shape}")
         # print(f"[EIIEConv] prev_action.numel(): {prev_action.numel()}")
         prev_action = prev_action.squeeze(1)
-        prev_action = prev_action[:, 1:]  
+        prev_action = prev_action[:, :-1]  
         prev_action = prev_action.view(prev_action.shape[0], 1, self.company_count, 1)
         # print(f"prev_action : {prev_action.shape}")
         # print(f"x : {x.shape}")

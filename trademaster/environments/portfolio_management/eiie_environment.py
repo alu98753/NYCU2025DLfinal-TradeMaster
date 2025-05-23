@@ -26,7 +26,7 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.test_dynamic=int(get_attr(kwargs, "test_dynamic", "-1"))
         self.task_index = int(get_attr(kwargs, "task_index", "-1"))
         self.work_dir = get_attr(kwargs, "work_dir", "")
-        time_steps = get_attr(self.dataset, "time_steps", 50)
+        time_steps = get_attr(self.dataset, "time_steps", 10)
         self.day = time_steps - 1
         self.train_flag = 0
 
@@ -52,6 +52,7 @@ class PortfolioManagementEIIEEnvironment(Environments):
             self.end_date = self.df.loc[:, 'date'].iloc[-1]
         else:
             self.df = pd.read_csv(self.df_path, index_col=0)
+            # print(f"df is : {self.df}")
 
         self.stock_dim = len(self.df.tic.unique())
         self.state_space_shape = self.stock_dim
@@ -94,6 +95,8 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.terminal = False
         self.portfolio_value = self.initial_amount
         self.asset_memory = [self.initial_amount]
+        # if len(self.asset_memory) <= 1:
+        #     print("[Warning] Not enough asset memory to evaluate.")
         self.portfolio_return_memory = [0]
         self.weights_memory = [[1] + [0] * self.stock_dim]
         self.date_memory = [self.data.date.unique()[0]]
@@ -104,6 +107,8 @@ class PortfolioManagementEIIEEnvironment(Environments):
         for j, tic in enumerate(data_slice.tic.unique()):
             for i, tech in enumerate(self.tech_indicator_list):
                 series = data_slice[data_slice.tic == tic][tech].values
+                if np.any(np.isnan(series)):
+                    print(f"[Warning] NaN in series for {tic}-{tech}")
                 series = pd.Series(series).ffill().bfill().values
                 if len(series) < self.time_steps:
                     series = np.pad(series, (self.time_steps - len(series), 0), mode='edge')
@@ -175,27 +180,27 @@ class PortfolioManagementEIIEEnvironment(Environments):
         else:  # directly use the process of
             self.weights_memory.append(weights)
             last_day_memory = self.df.loc[self.day, :]
+            # print(f"last_day_memory :{last_day_memory}")
             self.day += 1
-            self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :]
+            self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :] ##拿前50天的所有data
+
             self.state = self._build_state_tensor(self.data)
 
-            # self.state = np.transpose(self.state, (2, 0, 1))
-            new_price_memory = self.df.loc[self.day, :]
-            portfolio_weights = weights[1:]
-            portfolio_return = sum(((new_price_memory.close.values / last_day_memory.close.values) - 1) * portfolio_weights)
+            new_price_memory = self.df.loc[self.day, :] ##拿最新當天的price
+            portfolio_weights = weights[:-1] ##已經透過actor輸出的weight 不包括cash
+            
+            portfolio_return = sum(((new_price_memory.close.values / last_day_memory.close.values) - 1) * portfolio_weights)##看前一天與今天的漲幅
             if self.day < len(self.df.index.unique()) - 1 :
                 temp = self.day+1
             else :
                 temp = self.day
-            next_day_price_memory = self.df.loc[temp, :] ## price
+            next_day_price_memory = self.df.loc[temp, :] ## 明天的價格資料
             price_rate = 1
             if self.train_flag == 1:
-                price_rate = (next_day_price_memory.close.values / new_price_memory.close.values) 
+                price_rate = (next_day_price_memory.close.values / new_price_memory.close.values) ##得到明天跟今天價格資料的變化
 
-            weights_brandnew = self.normalization([weights[0]] + list(
-                np.array(weights[1:]) *
-                np.array((new_price_memory.close.values /
-                          last_day_memory.close.values))))
+            weights_brandnew = self.normalization([weights[-1]] + list(np.array(weights[:-1]) *
+                            np.array((new_price_memory.close.values /last_day_memory.close.values))))##調整作天到今天的現金比例
 
             self.weights_memory.append(weights_brandnew)
             weights_old = (self.weights_memory[-3])
@@ -203,13 +208,12 @@ class PortfolioManagementEIIEEnvironment(Environments):
             diff_weights = np.sum(
                 np.abs(np.array(weights_old) - np.array(weights_new)))
             transcationfee = diff_weights * self.transaction_cost_pct * self.portfolio_value
-            # new_portfolio_value = (self.portfolio_value -
-            #                        transcationfee) * (1 + portfolio_return)
-            new_portfolio_value = max(1.0, (self.portfolio_value - transcationfee) * (1 + portfolio_return))
-            portfolio_return = (new_portfolio_value -
-                                self.portfolio_value) / self.portfolio_value
+            new_portfolio_value = (self.portfolio_value -transcationfee) * (1 + portfolio_return)
+            # new_portfolio_value = max(1.0, (self.portfolio_value - transcationfee) * (1 + portfolio_return))
+            portfolio_return = (new_portfolio_value - self.portfolio_value) / self.portfolio_value
             if self.portfolio_value > 0 and new_portfolio_value > 0:
                 self.reward = np.log(new_portfolio_value) - np.log(self.portfolio_value)
+                self.reward = np.clip(self.reward, -1.0, 1.0)
             else:
                 self.reward = 0.0
             # self.reward = np.log(new_portfolio_value) - np.log(self.portfolio_value)
@@ -287,7 +291,15 @@ class PortfolioManagementEIIEEnvironment(Environments):
         # print(df, df.shape, len(df),len(daily_return))
         neg_ret_lst = df[df["daily_return"] < 0]["daily_return"]
         # print(f"ned_ret_lst :{neg_ret_lst}")
+        # if df["total assets"].values[-1]
         tr = df["total assets"].values[-1] / (df["total assets"].values[0] + 1e-10) - 1
+        # df["total assets"].to_csv(f'assets.csv', index=False, header=False)
+        if np.isnan(tr) or np.isinf(tr):
+            print("error tr")
+        # print("=== asset_memory ===")
+        # print(self.asset_memory[-5:])
+        # print("=== return_rate_list ===")
+        # print(self.get_daily_return_rate(self.asset_memory[-10:]))
         return_rate_list=self.get_daily_return_rate(df["total assets"].values)
         # print(f"tr :{tr}")
         # print(f"return_rate_list :{return_rate_list}")
