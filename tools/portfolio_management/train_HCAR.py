@@ -128,7 +128,7 @@ def main():
     num_original_features_for_actor = train_environment.state_dim 
     input_dim = len(train_environment.tech_indicator_list)
     time_steps = train_environment.time_steps      # time_steps 在原 EIIE 環境中代表 length_day, 例如 10 (我們為ASU/HCAR設為13)
-
+    print(f"times step:{time_steps}")
     # --- MODIFICATION START: 準備 HCAR_Actor 所需的額外參數 ---
     num_stocks_for_actor = action_dim # 對應 HCAR_Actor 的 num_stocks 和 ASU 的 num_nodes
     

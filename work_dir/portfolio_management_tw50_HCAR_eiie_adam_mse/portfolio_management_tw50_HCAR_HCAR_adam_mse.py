@@ -8,11 +8,10 @@ data = dict(
         'zopen', 'zhigh', 'zlow', 'zadjcp', 'zclose', 'zd_5', 'zd_10', 'zd_15',
         'zd_20', 'zd_25', 'zd_30'
     ],
-    length_day=20,
+    length_day=10,
     initial_amount=100000,
     transaction_cost_pct=0.001,
     test_dynamic_path='data/portfolio_management/tw50/test_with_label.csv',
-    time_steps=20,
     test_dynamic='-1')
 environment = dict(type='PortfolioManagementEIIEEnvironment')
 agent = dict(

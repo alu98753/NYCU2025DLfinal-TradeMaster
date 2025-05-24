@@ -30,7 +30,7 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.test_dynamic=int(get_attr(kwargs, "test_dynamic", "-1"))
         self.task_index = int(get_attr(kwargs, "task_index", "-1"))
         self.work_dir = get_attr(kwargs, "work_dir", "")
-        self.time_steps = get_attr(self.dataset, "time_steps", 10)
+        self.time_steps = get_attr(self.dataset, "length_day", 10)
         
 
         self.df_path = None

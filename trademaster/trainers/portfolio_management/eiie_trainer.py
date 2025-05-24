@@ -274,6 +274,21 @@ class PortfolioManagementEIIETrainer(Trainer):
             state, reward, done, return_dict = self.test_environment.step(action)
             episode_reward_sum += reward
             if done:
+                current_metrics = self.valid_environment.analysis_result() # (tr, sharpe, vol, mdd, cr, sor)
+                    # print("save dict keys:",list(save_dict.keys()))
+                wandb.log({
+                    "Valid Reward Sum": episode_reward_sum,
+                    "Validation/Profit_Margin": return_dict["Profit Margin"],
+                    "Validation/Excess_Profit": return_dict["Excess Profit"],
+                    "Validation/Daily_Return": return_dict["daily_return"],
+                    "Validation/Total_Assets": return_dict["total_assets"],
+                    "Validation/Total_Return": round(current_metrics[0]*100, 2),
+                    "Validation/Sharpe_Ratio": round(current_metrics[1], 4),
+                    "Validation/Volatility": round(current_metrics[2]*100, 2),
+                    "Validation/Max_Drawdown": round(current_metrics[3]*100, 2),
+                    "Validation/Calmar_Ratio": round(current_metrics[4], 4),
+                    "Validation/Sortino_Ratio": round(current_metrics[5], 4),
+                })
                 plot_metric_against_baseline(total_asset=return_dict['total_assets'],
                                              buy_and_hold=None, alg='Ensemble of Identical Independent Evaluators',
                                              task='test', color='darkcyan', save_dir=self.work_dir)

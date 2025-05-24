@@ -311,19 +311,24 @@ class TemporalFeatureExtractor(nn.Module):
 
     def forward(self, X_input, global_step=None):
         # X_input: [B, N, T_window, F_in]
+        # print(f"debug xinput:{X_input.shape}")
         if global_step is not None:
             wandb.log({"HCAR_Actor/3A_Temporal/0_Input_X_Mean": X_input.mean().item(),
                        "HCAR_Actor/3A_Temporal/0_Input_X_Std":  X_input.std().item()}, step=global_step)
 
         x = X_input.permute(0,3,1,2) # → [B, F_in, N, T_window]
-        
+        # print(f"DEBUG: TFE.forward - After permute x:{x.shape}")
+        # print(f"DEBUG: TFE.forward - padding check:{x.shape[3] < self.receptive_field_causal}")
         if x.shape[3] < self.receptive_field_causal: 
             padding_needed = self.receptive_field_causal - x.shape[3]
             x = nn.functional.pad(x, (padding_needed, 0))
-            if global_step is not None and global_step % 200 == 0:
-                 print(f"Padding input for TFE: original T={X_input.shape[3]}, target T for receptive field={self.receptive_field_causal}, padded to T={x.shape[3]}")
+            # if global_step is not None and global_step % 200 == 0:
+            #      print(f"Padding input for TFE: original T={x.shape[3]}, target T for receptive field={self.receptive_field_causal}, padded to T={x.shape[3]}")
         
+        # print(f"DEBUG: TFE.forward - After padding x:{x.shape}")
         x = self.start_conv(x)   # [B, C_hidden, N, T_window_padded_or_original]
+        # print(f"DEBUG: TFE.forward - After start_conv x:{x.shape}")
+
         # --- 修改：應用初始的 Norm 和 Activation ---
         x = self.start_norm(x)
         x = self.start_activation(x) # x 現在是第一個 TCN block 的輸入

@@ -25,11 +25,11 @@ data = dict(
     test_path='data/portfolio_management/tw50/test.csv',
     test_dynamic_path='data/portfolio_management/tw50/test_with_label.csv',
     tech_indicator_list=[
-        'zopen', 'zhigh', 'zlow', 'zadjcp', 'zclose', # limitflag , check 擇一
+        'zopen', 'zhigh', 'zlow', 'zadjcp', 'zclose',# "limitflag", "check", #  ,  擇一
         'zd_5', 'zd_10', 'zd_15', 'zd_20', 'zd_25', 'zd_30'
     ],
-    time_steps=20,
-    length_day=20,
+    # time_steps=30,
+    length_day=10,
     initial_amount=100000,
     transaction_cost_pct=0.001)
 
