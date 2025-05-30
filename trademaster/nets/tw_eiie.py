@@ -8,8 +8,8 @@ from trademaster.utils import build_conv2d
 class EIIEConv(Net):
     def __init__(self,
                  input_dim=11,
-                 company_count=42,
-                 time_steps=50,
+                 company_count=49,
+                 time_steps=10,
                  output_dim = 1,
                  kernel_size=[(1, 3),(1,48)],
                  dims=(32, 20)):

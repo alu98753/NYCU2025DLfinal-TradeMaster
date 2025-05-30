@@ -175,29 +175,22 @@ class PortfolioManagementEIIEEnvironment(Environments):
                 with open(metric_save_path, 'wb') as handle:
                     pickle.dump(save_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-            return self.state, 0, self.terminal, {"sharpe_ratio": sharpe_ratio,"total_assets": assets}, 1
+            return self.state, 0, self.terminal, {"sharpe_ratio": sharpe_ratio,"total_assets": assets}
 
         else:  # directly use the process of
             self.weights_memory.append(weights)
             last_day_memory = self.df.loc[self.day, :]
             # print(f"last_day_memory :{last_day_memory}")
             self.day += 1
-            self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :] ##拿前50天的所有data
+            self.data = self.df.loc[self.day - self.time_steps + 1:self.day, :] ##拿明天之後前50天的所有data
 
             self.state = self._build_state_tensor(self.data)
 
-            new_price_memory = self.df.loc[self.day, :] ##拿最新當天的price
+            new_price_memory = self.df.loc[self.day, :] ##拿最新明天的price
             portfolio_weights = weights[:-1] ##已經透過actor輸出的weight 不包括cash
+            cash_weight = weights[-1]
             
             portfolio_return = sum(((new_price_memory.close.values / last_day_memory.close.values) - 1) * portfolio_weights)##看前一天與今天的漲幅
-            if self.day < len(self.df.index.unique()) - 1 :
-                temp = self.day+1
-            else :
-                temp = self.day
-            next_day_price_memory = self.df.loc[temp, :] ## 明天的價格資料
-            price_rate = 1
-            if self.train_flag == 1:
-                price_rate = (next_day_price_memory.close.values / new_price_memory.close.values) ##得到明天跟今天價格資料的變化
 
             weights_brandnew = self.normalization([weights[-1]] + list(np.array(weights[:-1]) *
                             np.array((new_price_memory.close.values /last_day_memory.close.values))))##調整作天到今天的現金比例
@@ -209,11 +202,10 @@ class PortfolioManagementEIIEEnvironment(Environments):
                 np.abs(np.array(weights_old) - np.array(weights_new)))
             transcationfee = diff_weights * self.transaction_cost_pct * self.portfolio_value
             new_portfolio_value = (self.portfolio_value -transcationfee) * (1 + portfolio_return)
-            # new_portfolio_value = max(1.0, (self.portfolio_value - transcationfee) * (1 + portfolio_return))
             portfolio_return = (new_portfolio_value - self.portfolio_value) / self.portfolio_value
             if self.portfolio_value > 0 and new_portfolio_value > 0:
                 self.reward = np.log(new_portfolio_value) - np.log(self.portfolio_value)
-                self.reward = np.clip(self.reward, -1.0, 1.0)
+                # self.reward = np.clip(self.reward, -1.0, 1.0)
             else:
                 self.reward = 0.0
             # self.reward = np.log(new_portfolio_value) - np.log(self.portfolio_value)
@@ -225,7 +217,7 @@ class PortfolioManagementEIIEEnvironment(Environments):
 
             self.reward = self.reward
 
-        return self.state, self.reward, self.terminal, {"weights_brandnew":weights_brandnew}, price_rate
+        return self.state, self.reward, self.terminal, {"weights_brandnew":weights_brandnew}
 
     def normalization(self, actions):
         # a normalization function not only for actions to transfer into weights but also for the weights of the

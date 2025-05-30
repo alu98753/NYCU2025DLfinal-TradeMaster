@@ -20,9 +20,9 @@ _base_ = [
 data = dict(
     type='PortfolioManagementDataset',
     data_path='data/portfolio_management/tw50',
-    train_path='data/portfolio_management/tw50/train.csv',
-    valid_path='data/portfolio_management/tw50/valid.csv',
-    test_path='data/portfolio_management/tw50/test.csv',
+    train_path='data/portfolio_management/tw50/train_.csv',
+    valid_path='data/portfolio_management/tw50/valid_.csv',
+    test_path='data/portfolio_management/tw50/test_.csv',
     test_dynamic_path='data/portfolio_management/tw50/test_with_label.csv',
     tech_indicator_list=[
         'zopen', 'zhigh', 'zlow', 'zadjcp', 'zclose',
@@ -38,7 +38,7 @@ transition = dict(
 )
 agent = dict(
     type='PortfolioManagementEIIE',
-    memory_capacity=1000, #added 1000->10000
+    memory_capacity=2000, #added 1000->2000
     gamma=0.99,
     policy_update_frequency=500)#500->10
 

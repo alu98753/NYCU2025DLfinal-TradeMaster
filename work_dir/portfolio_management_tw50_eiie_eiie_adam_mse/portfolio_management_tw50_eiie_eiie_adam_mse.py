@@ -1,9 +1,9 @@
 data = dict(
     type='PortfolioManagementDataset',
     data_path='data/portfolio_management/tw50',
-    train_path='data/portfolio_management/tw50/train.csv',
-    valid_path='data/portfolio_management/tw50/valid.csv',
-    test_path='data/portfolio_management/tw50/test.csv',
+    train_path='data/portfolio_management/tw50/train_.csv',
+    valid_path='data/portfolio_management/tw50/valid_.csv',
+    test_path='data/portfolio_management/tw50/test_.csv',
     tech_indicator_list=[
         'zopen', 'zhigh', 'zlow', 'zadjcp', 'zclose', 'zd_5', 'zd_10', 'zd_15',
         'zd_20', 'zd_25', 'zd_30'
@@ -11,13 +11,13 @@ data = dict(
     length_day=10,
     initial_amount=100000,
     transaction_cost_pct=0.001,
-    time_steps=50,
+    time_steps=10,
     test_dynamic_path='data/portfolio_management/tw50/test_with_label.csv',
     test_dynamic='-1')
 environment = dict(type='PortfolioManagementEIIEEnvironment')
 agent = dict(
     type='PortfolioManagementEIIE',
-    memory_capacity=1000,
+    memory_capacity=2000,
     gamma=0.99,
     policy_update_frequency=500)
 trainer = dict(

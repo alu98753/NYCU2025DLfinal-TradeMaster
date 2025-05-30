@@ -45,10 +45,10 @@ class PortfolioManagementEIIETrainer(Trainer):
         if self.if_off_policy:  # off-policy
             self.batch_size = int(get_attr(kwargs, "batch_size", 64))
             self.horizon_len = int(get_attr(kwargs, "horizon_len", 2048))## added 512 -> 1024
-            self.buffer_size = int(get_attr(kwargs, "buffer_size", 4000))
+            self.buffer_size = int(get_attr(kwargs, "buffer_size", 4000))# 4000 -> 5000
         else:  # on-policy
             self.batch_size = int(get_attr(kwargs, "batch_size", 128))
-            self.horizon_len = int(get_attr(kwargs, "horizon_len", 512))
+            self.horizon_len = int(get_attr(kwargs, "horizon_len", 1024))
             self.buffer_size = int(get_attr(kwargs, "buffer_size", 128))
         self.epochs = int(get_attr(kwargs, "epochs", 20))
 
@@ -68,7 +68,6 @@ class PortfolioManagementEIIETrainer(Trainer):
             'next_state': (self.buffer_size, self.num_envs,
                       self.action_dim, self.time_steps,
                       self.state_dim),
-            'price_ratios': (self.buffer_size, self.num_envs, self.action_dim),
         })
 
         self.verbose = get_attr(kwargs, "verbose", False)
@@ -171,7 +170,7 @@ class PortfolioManagementEIIETrainer(Trainer):
                     if self.if_discrete:
                         tensor_action = tensor_action.argmax(dim=1)
                     action = tensor_action.detach().cpu().numpy()[0]
-                    state, reward, done, save_dict, _ = self.valid_environment.step(action)
+                    state, reward, done, save_dict = self.valid_environment.step(action)
                     episode_reward_sum += reward
                     prev_action = tensor_action.detach()
                     if done:
@@ -214,12 +213,12 @@ class PortfolioManagementEIIETrainer(Trainer):
         prev_action = torch.zeros((1, self.action_dim + 1), device=self.device)
         while True:
             tensor_state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-            # tensor_state = tensor_state.permute(0, 3, 1, 2)
+            tensor_state = tensor_state.permute(0, 3, 1, 2)
             tensor_action = get_action(tensor_state, prev_action)
             if self.if_discrete:
                 tensor_action = tensor_action.argmax(dim=1)
             action = tensor_action.detach().cpu().numpy()[0]
-            state, reward, done, return_dict ,_= self.test_environment.step(action)
+            state, reward, done, return_dict= self.test_environment.step(action)
             episode_reward_sum += reward
             if done:
                 plot_metric_against_baseline(total_asset=return_dict['total_assets'],
@@ -234,7 +233,7 @@ class PortfolioManagementEIIETrainer(Trainer):
         df = pd.DataFrame()
         df["daily_return"] = daily_return
         df["total assets"] = assets
-        df.to_csv(os.path.join(self.work_dir + "test_result.csv"))
+        df.to_csv(os.path.join(self.work_dir + "test_result49-1.csv"))
         daily_return = df.daily_return.values
         return daily_return
 
@@ -252,7 +251,7 @@ class PortfolioManagementEIIETrainer(Trainer):
                 action = policy(tensor_state, self.test_environment,weights_brandnew)
             else:
                 action = policy(tensor_state, self.test_environment)
-            state, reward, done, return_dict, _ = self.test_environment.step(action)
+            state, reward, done, return_dict= self.test_environment.step(action)
             episode_reward_sum += reward
             if done:
                 plot_metric_against_baseline(total_asset=return_dict['total_assets'],

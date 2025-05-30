@@ -2,9 +2,9 @@
 data = dict(
     type = "PortfolioManagementDataset",
     data_path = "data/portfolio_management/tw50",
-    train_path = "data/portfolio_management/tw50/train.csv",
-    valid_path = "data/portfolio_management/tw50/valid.csv",
-    test_path = "data/portfolio_management/tw50/test.csv",
+    train_path = "data/portfolio_management/tw50/train_.csv",
+    valid_path = "data/portfolio_management/tw50/valid_.csv",
+    test_path = "data/portfolio_management/tw50/test_.csv",
     tech_indicator_list = [
         "high",
         "low",
@@ -23,8 +23,8 @@ data = dict(
         "zd_25",
         "zd_30"
     ],
-    length_day = 50,
+    length_day = 10,
     initial_amount = 100000,
     transaction_cost_pct = 0.001,
-    time_steps = 50
+    time_steps = 10
 )

@@ -5,7 +5,7 @@ import numpy.random as rd
 from torch import Tensor
 from collections import namedtuple, OrderedDict
 
-Transition = namedtuple("Transition", ['state', 'prev_action', 'action', 'reward', 'undone','next_state', 'price_ratios'])
+Transition = namedtuple("Transition", ['state', 'prev_action', 'action', 'reward', 'undone','next_state'])
 
 class GeneralReplayBuffer:
     def __init__(self,

@@ -8,8 +8,7 @@ def Transition():
                                      'action',
                                      'reward',
                                      'undone',
-                                     'next_state', 
-                                     'price_ratios'])
+                                     'next_state'])
 
 @TRANSITIONS.register_module()
 def TransitionPD():

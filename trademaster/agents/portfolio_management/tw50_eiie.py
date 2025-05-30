@@ -45,7 +45,7 @@ class PortfolioManagementEIIE(AgentBase):
         self.act_optimizer = get_attr(kwargs, "act_optimizer", None)
 
 
-        self.transition = get_attr(kwargs, "transition", namedtuple("Transition", ['state', 'prev_action', 'action', 'reward', 'undone','next_state', 'price_ratio']))
+        self.transition = get_attr(kwargs, "transition", namedtuple("Transition", ['state', 'prev_action', 'action', 'reward', 'undone','next_state']))
 
     def get_save(self):
         models = {
@@ -93,14 +93,14 @@ class PortfolioManagementEIIE(AgentBase):
             action = torch.clamp(action, 0, 1)  # added
             states[t] = state
             ary_action = action[0].detach().cpu().numpy()
-            ary_state, reward, done, _, price_ratio = env.step(ary_action)  # next_state
+            ary_state, reward, done,_= env.step(ary_action)  # next_state
             state = torch.as_tensor(env.reset() if done else ary_state, dtype=torch.float32, device=self.device)
             actions[t] = action
             rewards[t] = reward
             dones[t] = done
             next_states[t] = state
             prev_actions[t] = prev_action
-            price_ratios[t] = torch.tensor(price_ratio, dtype=torch.float32, device=self.device)
+            # price_ratios[t] = torch.tensor(price_ratio, dtype=torch.float32, device=self.device)
             prev_action = action.detach()
 
         self.last_state = state
@@ -114,8 +114,7 @@ class PortfolioManagementEIIE(AgentBase):
             action = actions,
             reward = rewards,
             undone = undones,
-            next_state = next_states,
-            price_ratios=price_ratios
+            next_state = next_states
         )
         return transition
 
@@ -128,7 +127,7 @@ class PortfolioManagementEIIE(AgentBase):
             transition = buffer.sample(self.batch_size)
             state = transition.state.to(self.device)
             prev_action = transition.prev_action.to(self.device)
-            price_rate = transition.price_ratios.to(self.device)
+            reward = transition.reward.to(self.device)
             # print(f"x.shape : {state.shape}")
             state = state.permute(0, 3, 1, 2)
             action = self.act(state , prev_action)  # actor output: w_t
@@ -137,11 +136,11 @@ class PortfolioManagementEIIE(AgentBase):
             # y_{t+1} 是下一期價格變動比例 → 要預先儲存在 buffer 或重算
             # 假設 reward = ln(mu * y · w_t) 已存在 transition.reward 中
             # 則 loss 就是：-reward
-            portfolio_return = torch.sum(0.99 *price_rate * stock_weights, dim=1)
+            # portfolio_return = torch.sum(0.99 *price_rate * stock_weights, dim=1)
             # portfolio_return = torch.clamp(portfolio_return, min=-0.99, max=5.0)
-            log_return = torch.log(portfolio_return + 1)
+            # log_return = torch.log(portfolio_return + 1)
             entropy = -torch.sum(action * torch.log(action + 1e-10), dim=1).mean()
-            loss = -log_return.mean() - 0.001 * entropy
+            loss = -reward.mean() - 0.001 * entropy
             # loss = -log_return.mean()
 
             self.act_optimizer.zero_grad()
