@@ -29,7 +29,7 @@ data = dict(
         'zd_5', 'zd_10', 'zd_15', 'zd_20', 'zd_25', 'zd_30'
     ],
     # time_steps=30,
-    length_day=10,
+    length_day=10, # 10 11 days is good for tcns , less is not good
     initial_amount=100000,
     transaction_cost_pct=0.001)
 
@@ -55,7 +55,7 @@ agent = dict(
 
 trainer = dict(
     type='PortfolioManagementEIIETrainer',
-    epochs=30,
+    epochs=25,
     work_dir=work_dir,
     if_remove=False )
 
@@ -72,7 +72,7 @@ act = dict(
     temporal_hidden_dim = 64,#64,
     tcn_kernel_size = 2,
     num_tcn_layers = 4, #3
-    temporal_dropout = 0.4, #0.3
+    temporal_dropout = 0.4, #0.4 -> 4 is good in only tcns
 
     # 子模塊 3.B 參數
     relational_hidden_dim = 64, #64,
@@ -90,9 +90,19 @@ act = dict(
     fusion_method_for_scoring = 'cat',
 
     output_final_weights = True # 指示 HCAR_Actor 輸出最終權重
-)   
+)
 
 cri = dict(
+    type = "HCAR_Critic",
+    input_dim = None,
+    action_dim = None,
+    output_dim=1,
+    time_steps=None,
+    num_layers = 3,
+    hidden_size=128
+)
+
+cri2 = dict(
     type = "HCAR_Critic",
     input_dim = None,
     action_dim = None,

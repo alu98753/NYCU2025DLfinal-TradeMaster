@@ -114,9 +114,13 @@ class HCAR_Actor(nn.Module):
             }, step=global_step)
         # 子模塊 3.A
         h_temporal = self.temporal_feature_extractor(stock_observations_squeezed, global_step=global_step)
-        
+        # print(f"HCAR_Actor - Output from 3.A h_temporal mean: {h_temporal.mean().item()}")
+        # print(f"HCAR_Actor - Output from 3.A h_temporal std: {h_temporal.std().item()}")
+
         # 子模塊 3.B
         h_relational = self.relational_context_integrator(h_temporal, global_step=global_step, current_supports=current_dynamic_supports)
+        # print(f"HCAR_Actor - Output from 3.B h_relational mean: {h_relational.mean().item()}")
+        # print(f"HCAR_Actor - Output from 3.B h_relational std: {h_relational.std().item()}")
         
         # --- 準備送入 AssetScoringHead 的特徵 (與 __init__ 中的邏輯對應) ---
         if self.use_temporal_skip_to_scoring:
@@ -127,7 +131,7 @@ class HCAR_Actor(nn.Module):
             else: 
                 combined_features_for_scoring = h_relational 
         else:
-            combined_features_for_scoring = h_relational
+            combined_features_for_scoring = h_temporal
         # -------------------------------------------------------------l
         
         if global_step is not None:
@@ -184,10 +188,6 @@ class linear(nn.Module):
     def forward(self, x):
         return self.mlp(x)
 
-import torch
-import torch.nn as nn
-import math
-import wandb
 
 # TemporalAttentionPool 保持不變
 class TemporalAttentionPool(nn.Module):
@@ -430,8 +430,7 @@ class SpatialAttentionLayer(nn.Module):
         
         return S
 
-# --- 新的子模塊 3.B ---
-# --- RelationalContextIntegrator 修改 ---
+# --- 子模塊 3.B ---
 class RelationalContextIntegrator(nn.Module):
     def __init__(self, num_nodes, in_feature_dim, hidden_dim, num_gcn_layers=2,
                  dropout=0.3, supports=None,
