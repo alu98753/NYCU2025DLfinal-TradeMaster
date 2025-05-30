@@ -95,12 +95,19 @@ def main():
     if args.verbose == 1:
         print(cfg)
 
+    if task_name.startswith("test"):
+        mode='disabled'
+    else:
+        mode='online'
+
+
+
     ### init wandb
     wandb.init(
         project="HCAR_test_moduleB",
         name=f"{cfg.net_name}_{cfg.agent_name}_{cfg.optimizer_name}_{cfg.loss_name}_run_{time.time()}",
         config=cfg.to_dict(),
-        # mode="disabled",
+        mode=mode,
     )
     wandb.define_metric("agent_step")
 

@@ -55,7 +55,7 @@ agent = dict(
 
 trainer = dict(
     type='PortfolioManagementEIIETrainer',
-    epochs=25,
+    epochs=100,
     work_dir=work_dir,
     if_remove=False )
 
@@ -64,10 +64,30 @@ loss = dict(type='MSELoss')
 # optimizer = dict(type='Adam', lr=1e-6, weight_decay=1e-5) # 0.001
 optimizer = dict(type='Adam', lr=1e-6, weight_decay=1e-5) # 0.001 
 
+s_market_extractor_cfg = dict(
+    # F_in, num_stocks, time_steps 將動態傳入
+    temporal_processed_dim=64, # HCAR_Actor中TemporalFeatureExtractor的輸出維度 (temporal_hidden_dim)
+    s_market_dim=32,           # S_market 向量的目標維度
+    stock_pool_num_heads=4,    # 股票維度多頭注意力池化的頭數
+    stock_pool_dropout=0.1,
+    s_market_mlp_depth=2,
+    s_market_mlp_expansion_factor=2
+)
+
+gate_controller_cfg = dict(
+    s_market_dim=32, # 應與 s_market_extractor_cfg.s_market_dim 一致
+    controller_depth=2,
+    controller_expansion_factor=2,
+    cash_adjustment_scale=1.0, # Tanh 縮放因子
+    ema_alpha_gate=0.1         # 門控信號EMA平滑因子
+)
+
 act = dict(
     type="HCAR_Actor",
     # num_original_features, num_stocks, window_len, supports 會在 train_eiie.py 動態填充
-
+    s_market_extractor_config = s_market_extractor_cfg,
+    gate_controller_config = gate_controller_cfg,
+    
     # 子模塊 3.A 參數
     temporal_hidden_dim = 64,#64,
     tcn_kernel_size = 2,
@@ -94,6 +114,8 @@ act = dict(
 
 cri = dict(
     type = "HCAR_Critic",
+    # s_market_extractor_config_critic = s_market_extractor_cfg, # Critic 使用相同的S_market提取器配置
+
     input_dim = None,
     action_dim = None,
     output_dim=1,
@@ -102,12 +124,3 @@ cri = dict(
     hidden_size=128
 )
 
-cri2 = dict(
-    type = "HCAR_Critic",
-    input_dim = None,
-    action_dim = None,
-    output_dim=1,
-    time_steps=None,
-    num_layers = 3,
-    hidden_size=128
-)
