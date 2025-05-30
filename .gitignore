@@ -14,7 +14,7 @@
 
 # add
 *.pyc
-*.csv
-*.pth
+# *.csv
+# *.pth
 *.pkl
 *.png
