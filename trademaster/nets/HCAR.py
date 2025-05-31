@@ -18,7 +18,7 @@ from trademaster.nets.HCAR_util import  (
     AssetScoringHead,
     MultiHeadAttentionPooling,
 )
-from titans_pytorch.memory_models import MemoryMLP
+from titans_pytorch.memory_models import MemoryMLP,GatedResidualMemoryMLP
 
 @NETS.register_module()
 class HCAR_Actor(nn.Module):
@@ -63,6 +63,7 @@ class HCAR_Actor(nn.Module):
         )
 
         # s_market_extractor_config 從主設定檔傳入
+        self.s_market_dim = s_market_extractor_config['s_market_dim']
         temporal_processed_dim = self.temporal_feature_extractor.temporal_attention_pool.attn.embed_dim # 或配置中的 self.temporal_hidden_dim
         self.s_market_stock_pool = MultiHeadAttentionPooling(
             input_dim=temporal_processed_dim,
@@ -234,49 +235,102 @@ class HCAR_Actor(nn.Module):
       
                 }, step=global_step)
             
-            return action_probabilities
+            return action_probabilities, S_market
         else:
             # print(f"HCAR_Actor - Returning raw stock_logits shape: {stock_logits.shape}")
             return stock_logits
 
+# 在 trademaster/nets/HCAR.py 的 HCAR_Critic 類的 __init__ 方法中
+
 @NETS.register_module()
 class HCAR_Critic(Net):
     def __init__(self,
-                 input_dim,
-                 action_dim,
+                 input_dim,           # 每支股票的原始特征维度 F_in
+                 action_dim,          # 股票数量 N
                  output_dim=1,
                  time_steps=10,
-                 num_layers= 1,
-                 hidden_size = 32,
+                 num_layers=1,
+                 hidden_size=32,
+                 s_market_dim=1       # 只用 1 维宏观信号即可
                  ):
         super(HCAR_Critic, self).__init__()
 
         self.time_steps = time_steps
+        self.s_market_dim = s_market_dim
+        self.num_stocks = action_dim  # N
 
-        self.lstm = nn.LSTM(input_size=input_dim * time_steps,
-                            hidden_size=hidden_size,
-                            num_layers=num_layers,
-                            batch_first=True)
+        # —— LSTM 部分，跟原来一样 ——  
+        self.lstm = nn.LSTM(
+            input_size=input_dim * time_steps,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True
+        )
+        # 把 LSTM 隐藏向量压成 1 维
         self.linear1 = nn.Linear(hidden_size, output_dim)
         self.act = nn.ReLU()
-        self.linear2 = nn.Linear(2 * (action_dim + 1), 1)
+
+        # 计算 linear2 的输入总维度：
+        #  1) 每支股票压成 1 维后会得到 [B, N]，共 N 个数  
+        #  2) para：1 维  
+        #  3) action a： [B, N+1]  
+        #  4) 如果 s_market_dim>0，还要加上 [B, s_market_dim]  
+        in_features_linear2 = action_dim            # [B, N]
+        in_features_linear2 += 1                     # para (1 维)
+        in_features_linear2 += (action_dim + 1)      # a (N+1 维)
+        in_features_linear2 += self.s_market_dim     # [B, s_market_dim]
+
+        self.linear2 = nn.Linear(in_features_linear2, 1)
         self.para = torch.nn.Parameter(torch.ones(1).requires_grad_())
 
-    def forward(self, x, a):
+    def forward(self, x: torch.Tensor, a: torch.Tensor, s_market: torch.Tensor = None) -> torch.Tensor:
+        """
+        x: [B, N, T, F_in]
+        a: [B, N+1]
+        s_market: [B, s_market_dim] 或 None
+        """
+
+        # 1. 如果 x 是 4 维以上，就把它 reshape 成 [B, N, T*F_in]
         if len(x.shape) >= 4:
-            x = x.view(x.shape[0], x.shape[1], -1)
-        lstm_out, _ = self.lstm(x)
-        x = self.linear1(lstm_out)
+            B, N, T, F_in = x.shape
+            x_lstm = x.view(B, N, -1)
+        else:
+            # 如果 x 本来就是 [B, N, T*F_in]，直接用
+            x_lstm = x
+            B, N, T_and_F = x_lstm.shape[:3]
+            N = self.num_stocks
 
-        x = self.act(x)
+        # 2. LSTM 正向
+        #    lstm_out: [B, N, hidden_size]
+        lstm_out, _ = self.lstm(x_lstm)
 
-        x = x.view(x.shape[0], -1)
-        para = self.para.repeat(x.shape[0], 1)
+        # 3. linear1 + ReLU，把 hidden_size→1
+        #    x1: [B, N, 1] → ReLU → [B, N, 1]
+        x1 = self.linear1(lstm_out)
+        x1 = self.act(x1)
 
-        x = torch.cat((x, para, a), dim=1)
-        x = self.linear2(x)
-        # x = x.mean(dim = 1, keepdim=True)
-        return x
+        # 4. view 成 [B, N]
+        x_flat = x1.view(B, N)
+
+        # 5. para 复制成 [B, 1]
+        para_rep = self.para.repeat(B, 1)  # [B,1]
+
+        # 6. 最后拼接
+        #    如果有 s_market_dim>0 且 s_market 传进来了，就把它拼进去
+        if (self.s_market_dim > 0) and (s_market is not None):
+            # 确保形状正确
+            assert s_market.shape == (B, self.s_market_dim), \
+                f"Critic 期望 s_market 形状 [B, {self.s_market_dim}]，但收到 {tuple(s_market.shape)}"
+            combined = torch.cat((x_flat, para_rep, a, s_market), dim=1)
+            # combined → [B, N + 1 + (N+1) + s_market_dim] = [B, 2N+2 + s_market_dim]
+        else:
+            # 默认还是跟原来一样，只拼 x_flat、para、a
+            combined = torch.cat((x_flat, para_rep, a), dim=1)
+            # combined → [B, N + 1 + (N+1)] = [B, 2N+2]
+
+        # 7. linear2 输出 Q
+        q_value = self.linear2(combined)  # [B, 1]
+        return q_value
 
 
 # if __name__ == '__main__':

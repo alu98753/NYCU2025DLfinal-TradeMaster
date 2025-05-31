@@ -108,6 +108,8 @@ def main():
         name=f"{cfg.net_name}_{cfg.agent_name}_{cfg.optimizer_name}_{cfg.loss_name}_run_{time.time()}",
         config=cfg.to_dict(),
         mode=mode,
+        # mode='disabled'
+
     )
     wandb.define_metric("agent_step")
 

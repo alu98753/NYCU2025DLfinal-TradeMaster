@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from titans_pytorch.memory_models import MemoryMLP
+from titans_pytorch.memory_models import MemoryMLP,GatedResidualMemoryMLP
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))

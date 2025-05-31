@@ -46,10 +46,13 @@ act = dict(
 
 cri = dict(
     type = "HCAR_Critic",
+    s_market_dim = act['s_market_extractor_config']['s_market_dim'],
     input_dim = None,
     action_dim = None,
     output_dim=1,
     time_steps=None,
-    num_layers = 1,
-    hidden_size=32
+    num_layers = 3,
+    hidden_size=128,
+    # film_hidden=32,      # FiLM 内部隐藏维度
+    # aggregate_dim=128 
 )

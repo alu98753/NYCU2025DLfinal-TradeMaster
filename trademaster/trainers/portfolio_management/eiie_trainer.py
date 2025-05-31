@@ -58,7 +58,7 @@ class PortfolioManagementEIIETrainer(Trainer):
         #print('action_dim', self.action_dim)
         self.time_steps = self.agent.time_steps
         self.transition = self.agent.transition
-
+        D_s_market = self.agent.act.s_market_dim
         self.transition_shapes = OrderedDict({
             'state': (self.buffer_size, self.num_envs,
                       self.action_dim, self.time_steps,
@@ -69,6 +69,8 @@ class PortfolioManagementEIIETrainer(Trainer):
             'next_state': (self.buffer_size, self.num_envs,
                       self.action_dim, self.time_steps,
                       self.state_dim),
+            's_market': (self.buffer_size, self.num_envs, D_s_market),  
+            'next_s_market': (self.buffer_size, self.num_envs, D_s_market),
         })
 
         self.verbose = get_attr(kwargs, "verbose", False)
@@ -77,6 +79,8 @@ class PortfolioManagementEIIETrainer(Trainer):
         
         ### global data flow : trainer -> agent -> HCAR forward
         self.global_step = 0
+        
+
     
     def init_before_training(self):
         random.seed(self.random_seed)
@@ -190,7 +194,7 @@ class PortfolioManagementEIIETrainer(Trainer):
                     tensor_state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
                     # print("Shape of x  after unsqueeze (input to EIIEConv):",tensor_state.shape)
                     
-                    tensor_action = get_action(tensor_state)
+                    tensor_action , _= get_action(tensor_state)
                     if self.if_discrete:
                         tensor_action = tensor_action.argmax(dim=1)
                     action = tensor_action.detach().cpu().numpy()[0]
@@ -251,6 +255,7 @@ class PortfolioManagementEIIETrainer(Trainer):
         load_model(self.checkpoints_path,
                    epoch=max_index + 1,
                    save=self.agent.get_save())
+        # 存max_index 也就是vaild_score 最高的model
         save_best_model(
             output_dir=self.checkpoints_path,
             epoch=max_index + 1,
@@ -267,7 +272,7 @@ class PortfolioManagementEIIETrainer(Trainer):
         get_action = self.agent.act
         while True:
             tensor_state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-            tensor_action = get_action(tensor_state)
+            tensor_action, _= get_action(tensor_state)
             if self.if_discrete:
                 tensor_action = tensor_action.argmax(dim=1)
             action = tensor_action.detach().cpu().numpy()[0]
@@ -288,7 +293,7 @@ class PortfolioManagementEIIETrainer(Trainer):
                     "Validation/Max_Drawdown": round(current_metrics[3]*100, 2),
                     "Validation/Calmar_Ratio": round(current_metrics[4], 4),
                     "Validation/Sortino_Ratio": round(current_metrics[5], 4),
-                })
+                }, step= self.agent.optimizer_steps)
                 plot_metric_against_baseline(total_asset=return_dict['total_assets'],
                                              buy_and_hold=None, alg='Ensemble of Identical Independent Evaluators',
                                              task='test', color='darkcyan', save_dir=self.work_dir)

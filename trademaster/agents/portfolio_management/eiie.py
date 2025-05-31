@@ -72,9 +72,8 @@ class PortfolioManagementEIIE(AgentBase):
             pass # 暫時不初始化衰減調度器，只做 warmup
 
         self.criterion = get_attr(kwargs, "criterion", None)
-
-        self.transition = get_attr(kwargs, "transition", namedtuple("Transition", ['state','action','reward','undone','next_state']))
-
+        self.transition = namedtuple("Transition", ['state', 'action', 'reward', 'undone', 'next_state','s_market', 'next_s_market'])
+        
     def _adjust_learning_rate(self, optimizer, initial_lr):
         """手動調整學習率以實現 Warmup"""
         if self.optimizer_steps < self.warmup_steps:
@@ -106,6 +105,11 @@ class PortfolioManagementEIIE(AgentBase):
         return res
 
     def explore_env(self, env, horizon_len: int,global_step) -> Tuple[Tensor, ...]:
+        D_s_market = self.act.s_market_dim # test
+
+        s_markets = torch.zeros((horizon_len, self.num_envs, D_s_market), dtype=torch.float32).to(self.device)
+        next_s_markets = torch.zeros((horizon_len, self.num_envs, D_s_market), dtype=torch.float32).to(self.device)
+
         states = torch.zeros((horizon_len,
                               self.num_envs,
                               self.action_dim,
@@ -123,28 +127,64 @@ class PortfolioManagementEIIE(AgentBase):
         state = self.last_state  # last_state.shape = (state_dim, ) for a single env.
         get_action = self.act
         for t in range(horizon_len):
-            action = get_action(state.unsqueeze(0))
-            states[t] = state
+            # 假設 state 的形狀是 [B, N, T, F_in] (B=num_envs)
+            # 如果 actor 的 forward 輸入是 [B, N, T, F_in]，則不需要 unsqueeze(0)
+            # 如果 actor 的 forward 輸入是 [N, T, F_in] (單樣本)，則需要 state.squeeze(0)
+            # 根據您 HCAR_Actor forward 的輸入處理，這裡的 state 應為 [num_envs, num_stocks, window_len, num_original_features]
 
-            ary_action = action[0].detach().cpu().numpy()
-            ary_state, reward, done, _ = env.step(ary_action)  # next_state
-            state = torch.as_tensor(env.reset() if done else ary_state, dtype=torch.float32, device=self.device)
-            actions[t] = action
+            current_s_market = self.act.s_market_stock_pool(self.act.temporal_feature_extractor(state, global_step=None)) # [B, D_s_market]
+
+            # action, _ = get_action(state) # 修改：接收 actor 返回的 S_market
+            # 由於explore_env的state通常是 (num_envs, N, T, F_in)
+            # 而 HCAR_Actor 的 forward 輸入是 (B, N, T, F_in) 或 (B, 1, N, T, F_in)
+            # 我們假設 HCAR_Actor.forward 能夠處理 [num_envs, N, T, F_in] 的輸入
+            action_probs, _ = self.act(state, global_step=global_step) # S_market 在 Actor 內部使用，這裡不需要它返回給 explore_env
+                                                                        # 但我們確實需要 current_s_market for the buffer
+
+            states[t] = state
+            s_markets[t] = current_s_market.detach() # 儲存當前 state 對應的 S_market
+
+            # ary_action = action[0].detach().cpu().numpy() # 如果 action 是 [1, N+1]
+            ary_action = action_probs.detach().cpu().numpy() # 如果 action_probs 是 [B, N+1]
+            if self.num_envs == 1:
+                ary_action = ary_action[0] # 取第一個 (也是唯一的) env 的動作
+
+            next_state_ary, reward, done, _ = env.step(ary_action)
+
+            # 更新 state (環境返回的 next_state_ary 是 numpy)
+            # done 是一個布爾值 (for single env) 或一個布爾數組 (for multiple envs)
+            if self.num_envs == 1:
+                if done:
+                    state = torch.as_tensor(env.reset(), dtype=torch.float32, device=self.device).unsqueeze(0)
+                else:
+                    state = torch.as_tensor(next_state_ary, dtype=torch.float32, device=self.device).unsqueeze(0)
+            else: # 多環境情況 (目前您的代碼主要針對單環境)
+                # state = ... (需要處理多環境的 reset 和 next_state_ary)
+                raise NotImplementedError("Multi-environment S_market handling in explore_env not fully detailed here.")
+
+            # 為 next_state 計算 next_s_market
+            # next_s_market_val = get_s_market_from_state(self.act, state) # state 此時已經是 next_state
+            next_s_market_val = self.act.s_market_stock_pool(self.act.temporal_feature_extractor(state, global_step=None))
+
+            actions[t] = action_probs # 如果 actions 張量是存概率分佈
             rewards[t] = reward
             dones[t] = done
             next_states[t] = state
+            next_s_markets[t] = next_s_market_val.detach() # 儲存 next_state 對應的 S_market
 
-        self.last_state = state
+        self.last_state = state.detach() # 保存最後的 next_state
 
         rewards *= self.reward_scale
         undones = 1.0 - dones.type(torch.float32)
 
         transition = self.transition(
-            state = states,
-            action = actions,
-            reward = rewards,
-            undone = undones,
-            next_state = next_states
+            state=states,
+            action=actions,
+            reward=rewards,
+            undone=undones,
+            next_state=next_states,
+            s_market=s_markets,          # 新增
+            next_s_market=next_s_markets # 新增
         )
         return transition
 
@@ -194,12 +234,14 @@ class PortfolioManagementEIIE(AgentBase):
         reward = transition.reward
         undone = transition.undone
         next_state = transition.next_state
-
-        a = self.act(state, global_step=self.optimizer_steps)
+        s_market = transition.s_market           
+        next_s_market = transition.next_s_market
+        
+        a, _ = self.act(state, global_step=self.optimizer_steps)
         wandb.log({
             "Action/Portfolio_Weights": wandb.Histogram(a.detach().cpu().numpy()),
             "agent_step": self.optimizer_steps}, step=self.optimizer_steps)
-        q = self.cri(state, a)
+        q = self.cri(state, a, s_market)
         a_loss = -torch.mean(q)
 
         self.act_optimizer.zero_grad()
@@ -251,10 +293,10 @@ class PortfolioManagementEIIE(AgentBase):
         ### 
         self.act_optimizer.step()
 
-        a_ = self.act(next_state)
-        q_ = self.cri(next_state, a_.detach())
+        a_, _  = self.act(next_state)
+        q_ = self.cri(next_state, a_.detach(), next_s_market.detach())
         q_target = reward + self.gamma * q_
-        q_eval = self.cri(state, action.detach())
+        q_eval = self.cri(state, action.detach(), s_market.detach())
 
         td_error = self.criterion(q_target.detach(), q_eval)
 

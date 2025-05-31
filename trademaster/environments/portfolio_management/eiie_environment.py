@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import os
 import sys
 from pathlib import Path
 
@@ -128,6 +128,11 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.transaction_cost_memory = [] 
         self.test_id = 'agent'
 
+        # log file
+        self.txt = "work_dir/portfolio_management_tw50_HCAR_eiie_adam_mse/metrics.txt"
+        os.makedirs(os.path.dirname(self.txt), exist_ok=True)
+        open(self.txt, "w").close()  # 清空檔案
+
     def reset(self):
         self.day_idx = self.time_steps - 1
 
@@ -177,6 +182,7 @@ class PortfolioManagementEIIEEnvironment(Environments):
             )
             table = print_metrics(stats)
             print(table)
+            
 
             df_return = self.save_portfolio_return_memory()
             daily_return_values = df_return.daily_return.values
@@ -191,8 +197,17 @@ class PortfolioManagementEIIEEnvironment(Environments):
                     "total_assets": assets_values
                 }
             )
-            metric_save_path = osp.join(self.work_dir, f'metric_{self.task}_{self.test_dynamic}_{self.test_id}_{self.task_index}.pickle')
+            
+            with open(self.txt, "a", encoding="utf-8") as f:
+                if (self.task.startswith("valid")):
+                    f.write("Valid Episode: " + "\n")
+                if (self.task.startswith("train")):
+                    f.write("Train Episode: " + "\n")
+                f.write(str(table) + "\n")
+                
             if self.task == 'test_dynamic': 
+                metric_save_path = osp.join(self.work_dir, f'metric_{self.task}_{self.test_dynamic}_{self.test_id}_{self.task_index}.pickle')
+
                 with open(metric_save_path, 'wb') as handle:
                     pickle.dump(save_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
             
