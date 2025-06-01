@@ -20,7 +20,8 @@ data = dict(
         "zd_15",
         "zd_20",
         "zd_25",
-        "zd_30"
+        "zd_30",
+        "regime",
     ],
     length_day = 10,
     initial_amount = 100000,

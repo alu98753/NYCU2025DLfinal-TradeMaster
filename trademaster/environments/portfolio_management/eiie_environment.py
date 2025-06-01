@@ -55,7 +55,8 @@ class PortfolioManagementEIIEEnvironment(Environments):
             self.end_date_str = df['date'].iloc[-1]
         else:
             df = pd.read_csv(self.df_path)
-        
+        # print(">>> [DEBUG] df.columns:", df.columns.tolist())
+
         # Store the original df only if an exact copy is needed elsewhere
         # self.df_raw = df.copy()
 
@@ -66,6 +67,12 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.stock_dim = len(self.unique_tics)
         self.num_tech_indicators = len(self.tech_indicator_list)
         self.num_unique_dates = len(self.unique_dates)
+
+        df_for_pivot = df.set_index(['date', 'tic'])
+        multi_index = pd.MultiIndex.from_product([self.unique_dates, self.unique_tics], names=['date', 'tic'])
+        regime_series = df_for_pivot['regime'].reindex(multi_index).unstack(level='tic')
+        self.regime_by_date = regime_series[self.unique_tics[0]].to_numpy(dtype=np.int64)  # 形状 (num_unique_dates,)
+
 
         self.date_to_idx = {date: i for i, date in enumerate(self.unique_dates)}
         self.tic_to_idx = {tic: i for i, tic in enumerate(self.unique_tics)}
@@ -158,6 +165,8 @@ class PortfolioManagementEIIEEnvironment(Environments):
         initial_weight_val = 1.0 / (self.stock_dim + 1)
         self.weights_memory = [[initial_weight_val] * (self.stock_dim + 1)]
         self.date_memory = [self.unique_dates[self.day_idx]]
+        self.current_regime = int(self.regime_by_date[self.day_idx])
+
         self.transaction_cost_memory = []
         
         return self.state.astype(np.float32)
@@ -166,6 +175,7 @@ class PortfolioManagementEIIEEnvironment(Environments):
         weights = np.asarray(weights, dtype=np.float32)
 
         self.terminal = self.day_idx >= self.num_unique_dates - 1
+        regime_t = int(self.regime_by_date[self.day_idx])
 
         if self.terminal:
             if self.task.startswith("test_dynamic"):
@@ -188,13 +198,16 @@ class PortfolioManagementEIIEEnvironment(Environments):
             daily_return_values = df_return.daily_return.values
             df_value = self.save_asset_memory()
             assets_values = df_value["total assets"].values
+            regime_next = regime_t
 
             save_dict = OrderedDict(
                 {
                     "Profit Margin": tr * 100,
                     "Excess Profit": tr * 100 - 0,
                     "daily_return": daily_return_values,
-                    "total_assets": assets_values
+                    "total_assets": assets_values,
+                    "regime_t": regime_t,
+                    "regime_next": regime_next
                 }
             )
             
@@ -281,8 +294,13 @@ class PortfolioManagementEIIEEnvironment(Environments):
             self.portfolio_return_memory.append(net_portfolio_return)
             self.date_memory.append(self.unique_dates[self.day_idx])
             self.asset_memory.append(self.portfolio_value)
-
-            return self.state.astype(np.float32), float(self.reward), self.terminal, {"weights_brandnew": weights_brandnew.tolist()}
+            regime_next = int(self.regime_by_date[self.day_idx])
+            info = {
+                "weights_brandnew": weights_brandnew.tolist(),
+                "regime_t": regime_t,
+                "regime_next": regime_next
+            }
+            return self.state.astype(np.float32), float(self.reward), self.terminal, info
 
     def normalization(self, actions: np.ndarray) -> np.ndarray:
         actions = np.asarray(actions, dtype=np.float32)

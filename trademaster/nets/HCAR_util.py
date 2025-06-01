@@ -152,9 +152,11 @@ class TemporalFeatureExtractor(nn.Module):
     def forward(self, X_input, global_step=None):
         # X_input: [B, N, T_window, F_in]
         # print(f"debug xinput:{X_input.shape}")
-        if global_step is not None:
+        if global_step is not None and global_step % 1000  == 0: # 定期記錄權重和偏置
             wandb.log({"HCAR_Actor/3A_Temporal/0_Input_X_Mean": X_input.mean().item(),
-                       "HCAR_Actor/3A_Temporal/0_Input_X_Std":  X_input.std().item()}, step=global_step)
+                       "HCAR_Actor/3A_Temporal/0_Input_X_Std":  X_input.std().item(),
+                        "agent_step": global_step,
+                       })
 
         x = X_input.permute(0,3,1,2) # → [B, F_in, N, T_window]
         # print(f"DEBUG: TFE.forward - After permute x:{x.shape}")
@@ -173,21 +175,28 @@ class TemporalFeatureExtractor(nn.Module):
         x = self.start_norm(x)
         x = self.start_activation(x) # x 現在是第一個 TCN block 的輸入
         
-        if global_step is not None:
+        if global_step is not None and global_step % 1000  == 0: # 定期記錄權重和偏置
             wandb.log({"HCAR_Actor/3A_Temporal/1_After_StartProcessing_Mean": x.mean().item(), # 日誌名可改為更準確的
-                       "HCAR_Actor/3A_Temporal/1_After_StartProcessing_Std":  x.std().item()}, step=global_step)
+                       "HCAR_Actor/3A_Temporal/1_After_StartProcessing_Std":  x.std().item(),
+                        "agent_step": global_step,
+                        } )
             
         for i in range(self.layers):
             x = self.tcn_blocks[i](x) # 每個塊內部處理殘差和規範化
-            if global_step is not None:
+            if global_step is not None and global_step % 1000  == 0: # 定期記錄權重和偏置
                 wandb.log({f"HCAR_Actor/3A_Temporal/2_Layer{i}_BlockOutput_Mean": x.mean().item(),
-                           f"HCAR_Actor/3A_Temporal/2_Layer{i}_BlockOutput_Std":  x.std().item()}, step=global_step)
+                           f"HCAR_Actor/3A_Temporal/2_Layer{i}_BlockOutput_Std":  x.std().item(),
+                           
+                           "agent_step": global_step,
+                           } )
 
         out = self.temporal_attention_pool(x) 
         
-        if global_step is not None:
+        if global_step is not None and global_step % 1000  == 0: # 定期記錄權重和偏置
             wandb.log({"HCAR_Actor/3A_Temporal/3_Final_h_temporal_Mean": out.mean().item(),
-                       "HCAR_Actor/3A_Temporal/3_Final_h_temporal_Std":  out.std().item()}, step=global_step)
+                       "HCAR_Actor/3A_Temporal/3_Final_h_temporal_Std":  out.std().item(),
+                        "agent_step": global_step,
+                        } )
         return out
 
 
@@ -337,29 +346,28 @@ class RelationalContextIntegrator(nn.Module):
 
     def forward(self, h_temporal, global_step=None, current_supports=None):
         # h_temporal 輸入形狀: [batch_size, num_stocks, in_feature_dim]
-        if global_step is not None:
-            wandb.log({
-                "HCAR_Actor/3B_Relational/0_Input_h_temporal_Mean": h_temporal.mean().item(),
-                "HCAR_Actor/3B_Relational/0_Input_h_temporal_Std": h_temporal.std().item(),
-            }, step=global_step)
         
         x_after_start_linear = self.start_linear(h_temporal)
         
-        if global_step is not None and global_step % 100 == 0: # 定期記錄權重和偏置
+        if global_step is not None and global_step % 1000  == 0: # 定期記錄權重和偏置
             wandb.log({
+                "HCAR_Actor/3B_Relational/0_Input_h_temporal_Mean": h_temporal.mean().item(),
+                "HCAR_Actor/3B_Relational/0_Input_h_temporal_Std": h_temporal.std().item(),
                 "HCAR_Actor/3B_Relational/StartLinear_Weight_AbsMean": self.start_linear.weight.data.abs().mean().item(),
                 "HCAR_Actor/3B_Relational/StartLinear_Weight_Std": self.start_linear.weight.data.std().item(),
                 "HCAR_Actor/3B_Relational/StartLinear_Bias_AbsMean": self.start_linear.bias.data.abs().mean().item() if self.start_linear.bias is not None else 0,
-            }, step=global_step)
+                "agent_step": global_step,
+            } )
             # 記錄梯度的部分應在 backward() 之後，優化器 step() 之前，通常在 Agent 中完成
 
         x = self.ln_start_relational(x_after_start_linear) # x 的形狀是 [B, N, C_hidden]
         
-        if global_step is not None:
+        if global_step is not None and global_step % 1000  == 0: # 定期記錄權重和偏置
             wandb.log({ 
                 "HCAR_Actor/3B_Relational/1b_After_StartLinearLN_Mean": x.mean().item(),
                 "HCAR_Actor/3B_Relational/1b_After_StartLinearLN_Std": x.std().item(),
-            }, step=global_step)
+                "agent_step": global_step,
+            } )
             
         # 只有當 GCN 或 SA 啟用時才執行 GCN/SA 堆疊
         if self.gcn_bool or self.spatialattn_bool:
@@ -390,11 +398,12 @@ class RelationalContextIntegrator(nn.Module):
                 # Spatial Attention 處理
                 if self.spatialattn_bool and self.sans and self.sans[i] is not None:
                     attn_weights = self.sans[i](x_after_gcn) # SA 作用於 GCN 輸出
-                    if global_step is not None:
+                    if global_step is not None and global_step % 1000  == 0: # 定期記錄權重和偏置
                         wandb.log({
                             f"HCAR_Actor/3B_Relational/2_Layer{i}_AttnWeights_Mean": attn_weights.mean().item(),
                             f"HCAR_Actor/3B_Relational/2_Layer{i}_AttnWeights_Std": attn_weights.std().item(),
-                        }, step=global_step)
+                            "agent_step": global_step,
+                        } )
                     x_after_sa = torch.einsum('bnm,bfml->bfnl', (attn_weights, x_after_gcn))
                 else:
                     x_after_sa = x_after_gcn # 如果不用 SA，則直接使用 GCN 的輸出
@@ -403,18 +412,20 @@ class RelationalContextIntegrator(nn.Module):
                 x = x + residual 
                 x = self.gcn_bns[i](x) 
                 
-                if global_step is not None:
+                if global_step is not None and global_step % 1000  == 0: # 定期記錄權重和偏置
                     wandb.log({
                         f"HCAR_Actor/3B_Relational/3_Layer{i}_BlockOutput_Mean": x.mean().item(),
                         f"HCAR_Actor/3B_Relational/3_Layer{i}_BlockOutput_Std": x.std().item(),
-                    }, step=global_step)
+                        "agent_step": global_step,
+                    } )
         # 如果 GCN 和 SA 都為 False，x 就是 self.ln_start_relational(x_after_start_linear) 的結果
         
-        if global_step is not None:
+        if global_step is not None and global_step % 1000  == 0: # 定期記錄權重和偏置
             wandb.log({
                 "HCAR_Actor/3B_Relational/4_Final_h_final_Mean": x.mean().item(),
                 "HCAR_Actor/3B_Relational/4_Final_h_final_Std": x.std().item(),
-            }, step=global_step)
+                "agent_step": global_step,
+            } )
             
         return x
 
@@ -454,11 +465,12 @@ class AssetScoringHead(nn.Module):
     def forward(self, h_final_input, global_step=None):
         # h_final_input 期望形狀: [batch_size, num_stocks, input_dim]
         # print(f"AssetScoringHead - Input h_final_input shape: {h_final_input.shape}")
-        if global_step is not None:
+        if global_step is not None and global_step % 1000  == 0: # 定期記錄權重和偏置
             wandb.log({
                 "HCAR_Actor/3C_Scoring/0_Input_h_final_Mean": h_final_input.mean().item(),
                 "HCAR_Actor/3C_Scoring/0_Input_h_final_Std": h_final_input.std().item(),
-            }, step=global_step)
+                "agent_step": global_step,
+            } )
         batch_size, num_stocks, feature_dim = h_final_input.shape
         
         # 為了讓 MLP 共享參數處理每個股票的特徵，我們先將 batch 和 num_stocks 維度合併
@@ -473,11 +485,12 @@ class AssetScoringHead(nn.Module):
         # 因為 output_dim 通常為 1，我們可以 squeeze(-1) 得到 [batch_size, num_stocks]
         output_scores = scores_flat.view(batch_size, num_stocks, -1).squeeze(-1)
         # print(f"AssetScoringHead - Final output_scores shape: {output_scores.shape}")
-        if global_step is not None:
+        if global_step is not None and global_step % 1000  == 0: # 定期記錄權重和偏置
             wandb.log({
                 "HCAR_Actor/3C_Scoring/1_Output_StockLogits_Mean": output_scores.mean().item(),
                 "HCAR_Actor/3C_Scoring/1_Output_StockLogits_Std": output_scores.std().item(),
-            }, step=global_step)
+                "agent_step": global_step,
+            } )
         return output_scores # 形狀 [batch_size, num_stocks]
 
 

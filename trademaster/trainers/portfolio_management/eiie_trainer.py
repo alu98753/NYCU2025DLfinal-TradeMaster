@@ -1,6 +1,11 @@
 from pathlib import Path
-
 import torch
+import numpy as np
+import os
+import pandas as pd
+import random
+from collections import OrderedDict
+import wandb
 
 ROOT = Path(__file__).resolve().parents[3]
 from ..custom import Trainer
@@ -8,12 +13,6 @@ from ..builder import TRAINERS
 from trademaster.utils import get_attr, save_model, \
     save_best_model, load_model, \
     load_best_model, GeneralReplayBuffer,plot_metric_against_baseline
-import numpy as np
-import os
-import pandas as pd
-import random
-from collections import OrderedDict
-import wandb
 
 @TRAINERS.register_module()
 class PortfolioManagementEIIETrainer(Trainer):
@@ -58,7 +57,7 @@ class PortfolioManagementEIIETrainer(Trainer):
         #print('action_dim', self.action_dim)
         self.time_steps = self.agent.time_steps
         self.transition = self.agent.transition
-        D_s_market = self.agent.act.s_market_dim
+        D_s_market = self.agent.act.s_market_dim if hasattr(self.agent.act, 's_market_dim') else 0 # 處理 getattr 返回 None 的情況
         self.transition_shapes = OrderedDict({
             'state': (self.buffer_size, self.num_envs,
                       self.action_dim, self.time_steps,
@@ -71,9 +70,19 @@ class PortfolioManagementEIIETrainer(Trainer):
                       self.state_dim),
             's_market': (self.buffer_size, self.num_envs, D_s_market),  
             'next_s_market': (self.buffer_size, self.num_envs, D_s_market),
+            'regime':          (self.buffer_size, self.num_envs),
+            'next_regime':     (self.buffer_size, self.num_envs),
         })
 
         self.verbose = get_attr(kwargs, "verbose", False)
+        
+        # --- 新增 MarketNet 校準相關配置 ---
+        self.calibrate_marketnet_every_epoch = get_attr(kwargs, "calibrate_marketnet_every_epoch", True)
+        self.marketnet_calibrate_target_acc = get_attr(kwargs, "marketnet_calibrate_target_acc", 0.88)
+        self.marketnet_calibrate_max_steps = get_attr(kwargs, "marketnet_calibrate_max_steps", 50000) # 每次校準的最大優化步數
+        self.marketnet_calibrate_batch_size = get_attr(kwargs, "marketnet_calibrate_batch_size", 64)
+        self.marketnet_calibrate_lr = get_attr(kwargs, "marketnet_calibrate_lr", 1e-4) # 校準專用學習率
+        # ------------------------------------
 
         self.init_before_training()
         
@@ -109,6 +118,113 @@ class PortfolioManagementEIIETrainer(Trainer):
         self.checkpoints_path = os.path.join(self.work_dir, "checkpoints")
         if not os.path.exists(self.checkpoints_path):
             os.makedirs(self.checkpoints_path, exist_ok=True)
+
+
+    def _calibrate_marketnet(self, buffer: GeneralReplayBuffer, current_epoch: int):
+        if not self.agent.market:
+            if self.verbose: print("MarketNet not available, skipping calibration.")
+            return
+        if not self.agent.market_criterion:
+            if self.verbose: print("MarketNet criterion not set on agent, skipping calibration.")
+            return
+
+        # print(f"\n[Trainer] Calibrating MarketNet for epoch {current_epoch} at agent_step {self.agent.optimizer_steps}...")
+        self.agent.market.train() 
+
+        # 解凍 MarketNet 參數
+        for param in self.agent.market.parameters():
+            param.requires_grad = True # <--- 確保所有參數都設為 True
+
+        # 準備 MarketNet 的優化器
+        # 重新獲取可訓練參數列表，因為它们的 requires_grad 狀態可能剛改變
+        current_trainable_market_params = list(filter(lambda p: p.requires_grad, self.agent.market.parameters()))
+
+        if not current_trainable_market_params:
+            print("No trainable parameters in MarketNet after setting requires_grad=True. Skipping calibration.")
+            self.agent.market.eval()
+            # 考慮是否需要重新凍結參數，如果這裡就返回了
+            # for param in self.agent.market.parameters():
+            #     param.requires_grad = False
+            return
+
+        # 無論如何都重新創建或確保優化器針對的是當前的可訓練參數和正確的學習率
+        # 這是因為 Adam 等優化器可能會在其內部狀態中快照參數的 requires_grad 狀態
+        print(f"Setting up MarketNet optimizer for calibration with LR: {self.marketnet_calibrate_lr}")
+        # if self.agent.market_optimizer is not None:
+        #     print(f"  Previous optimizer state: {self.agent.market_optimizer.state_dict()}") # 只是觀察，通常Adam狀態不需手動清
+        
+        # 總是為校準階段創建一個新的優化器實例，或確保現有實例更新其參數組
+        # 最簡單且最安全的方式是重新創建，以避免舊狀態問題
+        # self.agent.market_optimizer = torch.optim.Adam(
+        #     current_trainable_market_params, # 使用剛剛獲取的可訓練參數列表
+        #     lr=self.marketnet_calibrate_lr
+        # )
+
+
+        total_calibration_loss = 0
+        total_calibration_correct = 0
+        total_calibration_samples = 0
+
+        for cal_step in range(self.marketnet_calibrate_max_steps):
+            transition_sample = buffer.sample(self.marketnet_calibrate_batch_size)
+            s_market_batch = transition_sample.s_market
+            regime_batch = transition_sample.regime.view(-1).long()
+
+            # BatchNorm1d 要求 batch_size > 1 在訓練模式下
+            if s_market_batch.size(0) <= 1:
+                print(f"Skipping MarketNet calibration step {cal_step} due to batch size {s_market_batch.size(0)} <= 1")
+                continue
+            
+            s_market_batch = s_market_batch.view(s_market_batch.size(0), -1) # Flatten s_market
+
+            # for name, param in self.agent.market.named_parameters():
+            #     if param.requires_grad:
+            #         print(f"Parameter: {name}, requires_grad: {param.requires_grad}, grad: {param.grad is not None}")
+        #
+            _, logits = self.agent.market(s_market_batch)
+            loss = self.agent.market_criterion(logits, regime_batch)
+            # print(f"  Debug: s_market_batch.requires_grad = {s_market_batch.requires_grad}")
+            # print(f"  Debug: regime_batch.requires_grad = {regime_batch.requires_grad}")
+            # print(f"  Debug: logits.requires_grad = {logits.requires_grad}, logits.grad_fn = {logits.grad_fn}")
+            # print(f"  Debug: loss.requires_grad = {loss.requires_grad}, loss.grad_fn = {loss.grad_fn}")
+
+            self.agent.market_optimizer.zero_grad()
+            loss.backward()
+            self.agent.market_optimizer.step()
+            # for name, param in self.agent.market.named_parameters():
+            #     if param.requires_grad and param.grad is not None:
+            #         print(f"Parameter: {name}, grad norm: {param.grad.norm().item()}")
+
+            total_calibration_loss += loss.item()
+            with torch.no_grad():
+                preds = torch.argmax(logits, dim=1)
+                total_calibration_correct += (preds == regime_batch).float().sum().item()
+                total_calibration_samples += preds.size(0)
+
+            if (cal_step + 1) % 50 == 0 and total_calibration_samples > 0: # 每50步打印一次進度
+                current_acc = total_calibration_correct / total_calibration_samples
+                if self.verbose:
+                    print(f"  MarketNet Calibration Step: {cal_step+1}/{self.marketnet_calibrate_max_steps}, Avg Loss: {total_calibration_loss/(cal_step+1):.4f}, Current Avg Acc: {current_acc:.4f}")
+                if current_acc >= self.marketnet_calibrate_target_acc:
+                    if self.verbose: print(f"  MarketNet reached target accuracy of {self.marketnet_calibrate_target_acc:.4f}. Stopping calibration.")
+                    break
+        
+        avg_epoch_calibration_loss = total_calibration_loss / (cal_step + 1) if cal_step >=0 else float('nan')
+        avg_epoch_calibration_acc = total_calibration_correct / total_calibration_samples if total_calibration_samples > 0 else float('nan')
+
+        wandb.log({
+            "Market/Epoch_Calibration_AvgLoss": avg_epoch_calibration_loss,
+            "Market/Epoch_Calibration_AvgAcc": avg_epoch_calibration_acc,
+            "Market/Epoch_Calibration_Steps_Taken": cal_step + 1,
+            "agent_step": self.agent.optimizer_steps # 使用 agent 主訓練的步數作為x軸
+        })
+        print(f"[Trainer] MarketNet calibration finished for epoch {current_epoch}. Steps: {cal_step+1}, AvgLoss: {avg_epoch_calibration_loss:.4f}, AvgAcc: {avg_epoch_calibration_acc:.4f}\n")
+
+        self.agent.market.eval() # 校準完畢，設回評估模式
+        for param in self.agent.market.parameters():
+            param.requires_grad = False
+
+
 
     def train_and_valid(self):
         
@@ -159,10 +275,12 @@ class PortfolioManagementEIIETrainer(Trainer):
 
         valid_score_list = []
         save_dict_list = []
-        epoch = 1
-        print("Train Episode: [{}/{}]".format(epoch, self.epochs))
+        current_epoch = 1
+        print("Train Episode: [{}/{}]".format(current_epoch, self.epochs))
         while True:
             buffer_items = self.agent.explore_env(self.train_environment, self.horizon_len,self.global_step)
+            self.global_step += self.horizon_len # 更新 trainer 的 global_step
+
             # print("--- DataLoader Output / Agent Input ---\n\n")
             
             # print("Shape of batch['obs'] from DataLoader:",buffer_items.state.shape)
@@ -178,15 +296,28 @@ class PortfolioManagementEIIETrainer(Trainer):
 
             torch.set_grad_enabled(True)
             logging_tuple = self.agent.update_net(buffer,self.global_step)
-            self.global_step += 1
-
             torch.set_grad_enabled(False)
-
+            
+            # 檢查是否一個 episode 結束 (undone < 1.0 表示至少有一個 env done)
+            # 對於 portfolio management, episode 通常是整個回測期
+            # 因此，這裡的 "epoch" 概念可能對應於完成一次完整的數據遍歷或固定數量的 agent 更新步驟
+            # 我們假設當 buffer_items.undone 中有 True (即 0) 時，代表訓練環境的一個 episode 結束
+            # 這個條件可能需要根據你的環境設計來調整
             if torch.mean(buffer_items.undone) < 1.0:
-                print("Valid Episode: [{}/{}]".format(epoch, self.epochs))
+                print("Valid Episode: [{}/{}]".format(current_epoch, self.epochs))
+                # --- 校準 MarketNet ---
+                if self.calibrate_marketnet_every_epoch and self.agent.market:
+                    print(f"--- Preparing to calibrate MarketNet for epoch {current_epoch} ---")
+                    torch.set_grad_enabled(True) # 為 MarketNet 校準開啟梯度
+                    self._calibrate_marketnet(buffer, current_epoch)
+                    torch.set_grad_enabled(False) # 校準完畢後關閉梯度
+                    print(f"--- Finished calibrating MarketNet for epoch {current_epoch} ---")
+                if self.agent.market: # 驗證時 MarketNet 應為 eval
+                    self.agent.market.eval()
+                # --------------------
+                
                 state = self.valid_environment.reset()
                 episode_reward_sum = 0.0  # sum of rewards in an episode
-                get_action = self.agent.act
                 while True:
                     # print("--- Agent.explore_env ---\n\n")
                     # print("Shape of state before unsqueeze:",state.shape)
@@ -194,10 +325,20 @@ class PortfolioManagementEIIETrainer(Trainer):
                     tensor_state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
                     # print("Shape of x  after unsqueeze (input to EIIEConv):",tensor_state.shape)
                     
-                    tensor_action , _= get_action(tensor_state)
-                    if self.if_discrete:
-                        tensor_action = tensor_action.argmax(dim=1)
-                    action = tensor_action.detach().cpu().numpy()[0]
+                    # ———— 1) 先算出 S_market —— #
+                    # 注意：不用带梯度，因为验证时不更新网络
+                    with torch.no_grad():
+                        temp_feat = self.agent.act.temporal_feature_extractor(tensor_state, global_step=None)  # [1, N, hidden_dim]
+                        current_s_market = self.agent.act.s_market_stock_pool(temp_feat)                      # [1, D_s_market]
+
+                        # ———— 2) 用 MarketNet 得到 regime_probs —— #
+                        regime_probs_val, logits_val = self.agent.market(current_s_market)              # [1, 3]
+
+                        # ———— 3) 把 (state, regime_probs_val) 传给 Actor —— #
+                        val_action_probs, _ = self.agent.act(tensor_state, regime_probs_val)  # [1, N+1], _
+                        
+
+                    action = val_action_probs.detach().cpu().numpy()[0]
                     state, reward, done, save_dict = self.valid_environment.step(action)
                     episode_reward_sum += reward
                     if done:
@@ -229,9 +370,9 @@ class PortfolioManagementEIIETrainer(Trainer):
                             "Validation/Max_Drawdown": round(current_metrics[3]*100, 2),
                             "Validation/Calmar_Ratio": round(current_metrics[4], 4),
                             "Validation/Sortino_Ratio": round(current_metrics[5], 4),
-                            "agent_step": self.agent.optimizer_steps  # 使用 epoch 作為 x 軸
+                            "agent_step": self.agent.optimizer_steps
                             # ENT, ENB 需要額外計算
-                        }, step= self.agent.optimizer_steps)
+                        })
                         ### log
                         
                         break
@@ -239,13 +380,13 @@ class PortfolioManagementEIIETrainer(Trainer):
                 save_dict_list.append(save_dict)
 
                 save_model(self.checkpoints_path,
-                           epoch=epoch,
+                           epoch=current_epoch,
                            save=self.agent.get_save())
-                epoch += 1
-                if epoch <= self.epochs:
-                    print("Train Episode: [{}/{}]".format(epoch, self.epochs))
+                current_epoch += 1
+                if current_epoch <= self.epochs:
+                    print("Train Episode: [{}/{}]".format(current_epoch, self.epochs))
 
-            if epoch > self.epochs:
+            if current_epoch > self.epochs:
                 break
 
         max_index = np.argmax(valid_score_list)
@@ -267,12 +408,21 @@ class PortfolioManagementEIIETrainer(Trainer):
 
         print("Test Best Episode")
         state = self.test_environment.reset()
-
+        if self.agent.market:
+            self.agent.market.eval()
+        self.agent.act.eval()
         episode_reward_sum = 0
-        get_action = self.agent.act
         while True:
             tensor_state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-            tensor_action, _= get_action(tensor_state)
+            # 1) 先算 S_market
+            temp_feat = self.agent.act.temporal_feature_extractor(tensor_state, global_step=None)  # [1, N, hidden_dim]
+            current_s_market = self.agent.act.s_market_stock_pool(temp_feat)                      # [1, D_s_market]
+
+            # 2) 用 MarketNet 得 regime_probs
+            regime_probs_test, logits_val = self.agent.market(current_s_market)              # [1, 3]
+
+            # 3) 把 (tensor_state, regime_probs_test) 传给 Actor
+            tensor_action, _ = self.agent.act(tensor_state, regime_probs_test)  # [1, N+1], _
             if self.if_discrete:
                 tensor_action = tensor_action.argmax(dim=1)
             action = tensor_action.detach().cpu().numpy()[0]
@@ -293,7 +443,8 @@ class PortfolioManagementEIIETrainer(Trainer):
                     "Validation/Max_Drawdown": round(current_metrics[3]*100, 2),
                     "Validation/Calmar_Ratio": round(current_metrics[4], 4),
                     "Validation/Sortino_Ratio": round(current_metrics[5], 4),
-                }, step= self.agent.optimizer_steps)
+                    "agent_step": self.agent.optimizer_steps
+                })
                 plot_metric_against_baseline(total_asset=return_dict['total_assets'],
                                              buy_and_hold=None, alg='Ensemble of Identical Independent Evaluators',
                                              task='test', color='darkcyan', save_dir=self.work_dir)
@@ -314,7 +465,9 @@ class PortfolioManagementEIIETrainer(Trainer):
         state = self.test_environment.reset()
         self.test_environment.test_id = customize_policy_id
         print(f"Test customize policy: {str(customize_policy_id)}")
-
+        if self.agent.market:
+            self.agent.market.eval()
+        self.agent.act.eval()
         episode_reward_sum = 0
         weights_brandnew=None
         while True:

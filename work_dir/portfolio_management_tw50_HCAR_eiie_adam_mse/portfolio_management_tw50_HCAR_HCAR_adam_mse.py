@@ -13,7 +13,8 @@ data = dict(
     transaction_cost_pct=0.001,
     test_dynamic_path='data/portfolio_management/tw50/test_with_label.csv',
     test_dynamic='-1')
-environment = dict(type='PortfolioManagementEIIEEnvironment')
+environment = dict(
+    type='PortfolioManagementEIIEEnvironment', filter_start_date='2016-01-01')
 agent = dict(
     type='PortfolioManagementEIIE',
     memory_capacity=1000,
@@ -29,11 +30,16 @@ agent = dict(
     decay_gamma=0.5)
 trainer = dict(
     type='PortfolioManagementEIIETrainer',
-    epochs=32,
+    epochs=50,
     work_dir='work_dir/portfolio_management_tw50_HCAR_eiie_adam_mse',
-    if_remove=False)
+    if_remove=False,
+    calibrate_marketnet_every_epoch=True,
+    marketnet_calibrate_target_acc=0.93,
+    marketnet_calibrate_max_steps=1000,
+    marketnet_calibrate_batch_size=32,
+    marketnet_calibrate_lr=0.0001)
 loss = dict(type='MSELoss')
-optimizer = dict(type='Adam', lr=1e-06, weight_decay=1e-05)
+optimizer = dict(type='Adam', lr=3e-06, weight_decay=1e-05)
 s_market_extractor_cfg = dict(
     temporal_processed_dim=64,
     s_market_dim=32,
@@ -88,13 +94,19 @@ act = dict(
     ])
 cri = dict(
     type='HCAR_Critic',
-    s_market_dim=32,
+    num_regimes=2,
     input_dim=11,
     action_dim=49,
     output_dim=1,
     time_steps=10,
     num_layers=3,
     hidden_size=128)
+market = dict(
+    type='MarketNet',
+    s_market_dim=32,
+    hidden_depth=4,
+    expansion_factor=2,
+    market_lr=0.0001)
 transition = dict(type='Transition')
 task_name = 'portfolio_management'
 dataset_name = 'tw50'

@@ -62,6 +62,12 @@ from trademaster.utils import (
 
 set_seed(2023)
 
+################################################################################
+# ———— 新增部分：pretrain_marketnet 函数 ————
+################################################################################
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
+from torch.optim.lr_scheduler import StepLR
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Download Alpaca Datasets")
@@ -81,6 +87,208 @@ def parse_args():
     args = parser.parse_args()
     return args
 
+def pretrain_marketnet(
+    actor: torch.nn.Module,
+    market: torch.nn.Module,
+    env,
+    device: torch.device,
+    target_acc: float = 0.90,        # 牛/熊两类累积准确率都要 >= 0.90
+    max_pretrain_steps: int = 5000,  # 最多训练多少个 minibatch
+    batch_size: int = 32
+):
+    """
+    预训练 MarketNet（二分类）。要求：
+      1. 先采集所有 (s_market, regime_t) 样本，regime_t ∈ {0=牛市,1=熊市}。
+      2. 构造二分类数据集 + WeightedRandomSampler 平衡采样。
+      3. 训练时：
+         - 保留 minibatch 级别的 loss/accuracy 打印（或 log）；
+         - 每轮 epoch 结束时，计算“整轮 epoch”上对牛(0)/熊(1)两类的累计准确率，
+           如果牛/熊都 ≥ target_acc，就进行 Early Stop。
+      4. 学习率策略：初始 lr=1e-4，使用 StepLR 每 100 次 optimizer.step() 将 lr *= 0.5。
+      5. 最后冻结 market 网络，返回 market 和 actor（actor 恢复成 train 模式）。
+    """
+
+    # 1) 切换模式
+    actor.to(device).eval()
+    market.to(device).train()
+
+    # 2) 从环境里采集 (s_market, regime_t) 样本
+    all_s_market = []
+    all_labels   = []
+
+    state = env.reset()
+    done = False
+    while not done:
+        with torch.no_grad():
+            # actor 提取 S_market
+            st = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)  # [1, N, T, F_in]
+            h_temporal = actor.temporal_feature_extractor(st)        # [1, N, D_temp]
+            s_market_t = actor.s_market_stock_pool(h_temporal).squeeze(0)  # [D_s_market]
+
+        # 用“均匀持仓”让环境前进一步，获取 info["regime_t"]
+        dummy_action = np.ones(env.stock_dim + 1, dtype=np.float32)
+        dummy_action /= (env.stock_dim + 1)
+        next_state, reward, done, info = env.step(dummy_action)
+
+        lbl = int(info["regime_t"])  # 0 = 牛市, 1 = 熊市
+        all_s_market.append(s_market_t.cpu().numpy())
+        all_labels.append(lbl)
+
+        state = next_state
+
+    all_s_market = np.stack(all_s_market, axis=0)      # (样本数, D_s_market)
+    all_labels   = np.array(all_labels, dtype=np.int64) # (样本数,)
+    cnts = np.bincount(all_labels, minlength=2)
+    print(f"[Pretrain] 收集到牛熊样本数 = {len(all_labels)}, 分布 (Bull=0,Bear=1) = {cnts}")
+    if len(all_labels) == 0:
+        raise RuntimeError("预训练时没有任何牛熊样本！")
+
+    # 3) 构造 Dataset + WeightedRandomSampler，做类别均衡
+    tensor_s = torch.tensor(all_s_market, dtype=torch.float32)
+    tensor_y = torch.tensor(all_labels, dtype=torch.long)
+    dataset  = TensorDataset(tensor_s, tensor_y)
+
+    class_counts = cnts.astype(np.float32)
+    freq_bull = class_counts[0] if class_counts[0] > 0 else 1.0
+    freq_bear = class_counts[1] if class_counts[1] > 0 else 1.0
+
+    sample_weights = np.zeros(len(all_labels), dtype=np.float32)
+    sample_weights[all_labels == 0] = 1.0 / freq_bull
+    sample_weights[all_labels == 1] = (1.0 / freq_bear)
+
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+
+    train_loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        drop_last=True
+    )
+
+    # 4) 定义 Loss + Optimizer + Scheduler
+    criterion = nn.CrossEntropyLoss()
+    initial_lr = 1e-4  # 建议先用 1e-4，让网络快速“记住”牛/熊模式
+    optimizer = torch.optim.Adam(market.parameters(), lr=initial_lr)
+    # 每 100 次 optimizer.step() 就让 lr *= 0.5
+    scheduler = StepLR(optimizer, step_size=3000, gamma=0.98)
+
+    # 5) 在 wandb 中定义度量
+    wandb.define_metric("Pretrain/CE_Loss",     step_metric="pretrain_step")
+    wandb.define_metric("Pretrain/Acc_Bull",    step_metric="pretrain_step")
+    wandb.define_metric("Pretrain/Acc_Bear",    step_metric="pretrain_step")
+    wandb.define_metric("Pretrain/Acc_Overall", step_metric="pretrain_step")
+
+    step = 0
+    last_acc_bull = 0.0
+    last_acc_bear = 0.0
+
+    # 6) 训练循环：每轮 epoch 结束后检查是否 Early Stop
+    for epoch in range(1_000_000):
+        # 统计“整轮 epoch”上牛/熊两类的累计正确数和总样本数
+        bull_correct_sum = 0
+        bull_total_sum   = 0
+        bear_correct_sum = 0
+        bear_total_sum   = 0
+
+        for batch_s, batch_y in train_loader:
+            batch_s = batch_s.to(device)  # [B, D_s_market]
+            batch_y = batch_y.to(device)  # [B], ∈ {0,1}
+
+            # Forward
+            regime_probs, logits = market(batch_s)  # logits: [B,2]
+            loss = criterion(logits, batch_y)
+
+            # 反向传播 & 更新
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()  # 学习率衰减
+
+            # minibatch 级别的统计（可直接打 PRINT 或者 wandb.log）
+            with torch.no_grad():
+                preds = torch.argmax(logits, dim=1)  # [B]
+
+                # bull 类准确率 (label=0)
+                mask_bull = (batch_y == 0)
+                if mask_bull.sum().item() > 0:
+                    correct_bull = ((preds == batch_y) & mask_bull).float().sum().item()
+                else:
+                    correct_bull = 0.0
+                # bear 类准确率 (label=1)
+                mask_bear = (batch_y == 1)
+                if mask_bear.sum().item() > 0:
+                    correct_bear = ((preds == batch_y) & mask_bear).float().sum().item()
+                else:
+                    correct_bear = 0.0
+
+                # 更新“整轮 epoch”统计
+                bull_correct_sum += correct_bull
+                bull_total_sum   += mask_bull.sum().item()
+                bear_correct_sum += correct_bear
+                bear_total_sum   += mask_bear.sum().item()
+
+                # 计算 minibatch 上整体准确率
+                overall_acc = (preds == batch_y).float().mean().item()
+
+                # minibatch 级别的 log（你也可以在这里 print 或者 wandb.log）
+                wandb.log({
+                    "Pretrain/CE_Loss":     loss.item(),
+                    "Pretrain/Acc_Bull":    (correct_bull / (mask_bull.sum().item() + 1e-9)),
+                    "Pretrain/Acc_Bear":    (correct_bear / (mask_bear.sum().item() + 1e-9)),
+                    "Pretrain/Acc_Overall": overall_acc,
+                    "pretrain_step": step
+                },step = step)
+
+            step += 1
+            if step >= max_pretrain_steps:
+                print(f"[Pretrain] 达到 max_pretrain_steps={max_pretrain_steps}，强制停止")
+                break
+            
+        epoch_acc_bull = bull_correct_sum / (bull_total_sum + 1e-9)
+        epoch_acc_bear = bear_correct_sum / (bear_total_sum + 1e-9)
+
+        # 每个 epoch 结束后打印一次“整轮统计” + 当前 lr
+        if epoch % 30 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            print(
+                f"[Pretrain] epoch={epoch}, "
+                f"step={step}, "
+                f"EpochAcc_Bull={epoch_acc_bull:.3f}, "
+                f"EpochAcc_Bear={epoch_acc_bear:.3f}, "
+                f"lr={current_lr:.2e}"
+            )
+
+        # 检查 Early Stop 条件：整轮 epoch 上牛/熊都达标
+        if (not np.isnan(epoch_acc_bull) and epoch_acc_bull >= target_acc) and \
+           (not np.isnan(epoch_acc_bear) and epoch_acc_bear >= target_acc):
+            print(
+                f"[Pretrain] 【Early Stop】Epoch={epoch}, "
+                f"EpochAcc_Bull={epoch_acc_bull:.3f}, "
+                f"EpochAcc_Bear={epoch_acc_bear:.3f}"
+            )
+            break
+
+        if step >= max_pretrain_steps:
+            break
+
+    print(
+        f"[Pretrain] 结束：共 pretrain_steps={step}, "
+        f"FinalEpochAcc_Bull={epoch_acc_bull:.3f}, "
+        f"FinalEpochAcc_Bear={epoch_acc_bear:.3f}"
+    )
+
+    # 7) Freeze MarketNet 参数，恢复 Actor 为 train
+    market.eval()
+    for p in market.parameters():
+        p.requires_grad = False
+
+    actor.train()
+
+    return market, actor
 
 def main():
     args = parse_args()
@@ -104,15 +312,14 @@ def main():
 
     ### init wandb
     wandb.init(
-        project="HCAR_test_moduleB",
+        project="HCAR_test_market",
         name=f"{cfg.net_name}_{cfg.agent_name}_{cfg.optimizer_name}_{cfg.loss_name}_run_{time.time()}",
         config=cfg.to_dict(),
         mode=mode,
         # mode='disabled'
 
     )
-    wandb.define_metric("agent_step")
-
+    
     # Tell wandb which metrics should use which x-axis
     # For metrics logged per epoch (e.g., validation metrics)
     wandb.define_metric(
@@ -133,6 +340,7 @@ def main():
     wandb.define_metric(
         "Action/*", step_metric="agent_step"
     )  # Or "epoch" if logged per epoch
+    wandb.define_metric("Market/*", step_metric="agent_step") # 確保這個也有
 
     dataset = build_dataset(cfg)
 
@@ -231,6 +439,7 @@ def main():
 
     act = build_net(cfg.act)
     cri = build_net(cfg.cri)
+    market = build_net(cfg.market)
     wandb.watch(act, log="gradients", log_freq=500, log_graph=True)
     wandb.watch(cri, log="gradients", log_freq=500, log_graph=True)
 
@@ -242,6 +451,7 @@ def main():
 
     act_optimizer = build_optimizer(cfg, default_args=dict(params=act.parameters()))
     cri_optimizer = build_optimizer(cfg, default_args=dict(params=cri.parameters()))
+    market_optimizer = build_optimizer(cfg, default_args=dict(params=market.parameters()))
     criterion = build_loss(cfg)
     transition = build_transition(cfg)
 
@@ -253,8 +463,10 @@ def main():
             time_steps=time_steps,
             act=act,
             cri=cri,
+            market=market,
             act_optimizer=act_optimizer,
             cri_optimizer=cri_optimizer,
+            market_optimizer=market_optimizer,
             criterion=criterion,
             transition=transition,
             device=device,
@@ -263,6 +475,24 @@ def main():
             warmup_steps=cfg.agent.get("warmup_steps", 0),
         ),
     )
+
+    # ——— 在 Trainer.train_and_valid 之前：先对 MarketNet 做 pretrain ———
+    print("—— 开始预训练 MarketNet（二分类，均衡采样）——")
+
+    market_binary ,actor= pretrain_marketnet(
+        actor=act,
+        market=market.to(device),
+        env=train_environment,
+        device=device,
+        target_acc=0.90,
+        max_pretrain_steps=5000000,
+        batch_size=32
+    )
+    print("—— MarketNetBinary 预训练结束 (已 Freeze) ——")
+
+    # 然后再把预训练好的 market_binary 赋回给 agent.market：
+    agent.market = market_binary
+    agent.act = actor.to(device).train()
 
     if task_name.startswith("dynamics_test"):
         trainers = []

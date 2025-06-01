@@ -31,9 +31,12 @@ data = dict(
     # time_steps=30,
     length_day=10, # 10 11 days is good for tcns , less is not good
     initial_amount=100000,
-    transaction_cost_pct=0.001)
+    transaction_cost_pct=0.001)#0.001425
 
-environment = dict(type='PortfolioManagementEIIEEnvironment')
+environment = dict(
+    type='PortfolioManagementEIIEEnvironment',
+    filter_start_date="2016-01-01",
+    )
 transition = dict(
     type = "Transition"
 )
@@ -55,14 +58,20 @@ agent = dict(
 
 trainer = dict(
     type='PortfolioManagementEIIETrainer',
-    epochs=32,
+    epochs=50,
     work_dir=work_dir,
-    if_remove=False )
+    if_remove=False,
+    calibrate_marketnet_every_epoch=True,    # 是否每個 epoch 校準 MarketNet
+    marketnet_calibrate_target_acc=0.93,     # MarketNet 校準的目標準確率
+    marketnet_calibrate_max_steps=1000,     # 每次校準 MarketNet 的最大步數
+    marketnet_calibrate_batch_size=32,       # MarketNet 校準時的 batch_size
+    marketnet_calibrate_lr=1e-4              # MarketNet 校準時的學習率
+    )
 
 loss = dict(type='MSELoss')
 
 # optimizer = dict(type='Adam', lr=1e-6, weight_decay=1e-5) # 0.001
-optimizer = dict(type='Adam', lr=1e-6, weight_decay=1e-5) # 0.001 
+optimizer = dict(type='Adam', lr=3e-6, weight_decay=1e-5) # 0.001 
 
 s_market_extractor_cfg = dict(
     # F_in, num_stocks, time_steps 將動態傳入
@@ -114,7 +123,8 @@ act = dict(
 
 cri = dict(
     type = "HCAR_Critic",
-    s_market_dim = act['s_market_extractor_config']['s_market_dim'],
+    # s_market_dim = act['s_market_extractor_config']['s_market_dim'],
+    num_regimes = 2,
     input_dim = None,
     action_dim = None,
     output_dim=1,
@@ -125,7 +135,13 @@ cri = dict(
     # aggregate_dim=128 
 )
 
-
+market = dict(
+    type = "MarketNet",
+    s_market_dim = act['s_market_extractor_config']['s_market_dim'],      # 必须和 Actor.s_market_dim 完全一致
+    hidden_depth = 4,       # MLP 内部维度
+    expansion_factor = 2,
+    market_lr = 1e-4
+)       
 # num_layers=1, // lstm layers
 # hidden_size=32, // lstm hiddem
 # s_market_dim=1    

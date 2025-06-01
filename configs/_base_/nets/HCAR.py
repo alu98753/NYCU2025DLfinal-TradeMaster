@@ -46,7 +46,8 @@ act = dict(
 
 cri = dict(
     type = "HCAR_Critic",
-    s_market_dim = act['s_market_extractor_config']['s_market_dim'],
+    # s_market_dim = act['s_market_extractor_config']['s_market_dim'],
+    num_regimes = 2,
     input_dim = None,
     action_dim = None,
     output_dim=1,
@@ -56,3 +57,10 @@ cri = dict(
     # film_hidden=32,      # FiLM 内部隐藏维度
     # aggregate_dim=128 
 )
+market = dict(
+    type = "MarketNet",
+    s_market_dim = act['s_market_extractor_config']['s_market_dim'],      # 必须和 Actor.s_market_dim 完全一致
+    hidden_depth = 4,       # MLP 内部维度
+    expansion_factor = 2,
+    market_lr = 1e-4
+)     

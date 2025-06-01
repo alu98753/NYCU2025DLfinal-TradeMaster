@@ -16,3 +16,4 @@ from .titans import TitansPortfolioCritic
 
 from .HCAR import HCAR_Actor
 from .HCAR import HCAR_Critic
+from .HCAR import MarketNet

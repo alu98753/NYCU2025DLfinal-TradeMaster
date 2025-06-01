@@ -19,6 +19,40 @@ from trademaster.nets.HCAR_util import  (
     MultiHeadAttentionPooling,
 )
 from titans_pytorch.memory_models import MemoryMLP,GatedResidualMemoryMLP
+@NETS.register_module()
+class MarketNet(nn.Module):
+    def __init__(
+        self,
+        s_market_dim: int,
+        hidden_depth: int,
+        expansion_factor: float,
+        market_lr: float = 1e-4
+    ):
+        super(MarketNet, self).__init__()
+        self.market_lr = market_lr
+        self.mem_mlp = MemoryMLP(
+            dim=s_market_dim,
+            depth=hidden_depth,
+            expansion_factor=expansion_factor
+        )
+        self.bn = nn.BatchNorm1d(s_market_dim)
+        self.dropout = nn.Dropout(p=0.1)
+
+        # 把单层线性 -> 改成 “线性 → GELU → 线性”
+        self.classifier = nn.Sequential(
+            nn.Linear(s_market_dim, s_market_dim),
+            nn.GELU(),
+            nn.Linear(s_market_dim, 2)
+        )
+
+    def forward(self, s_market: torch.Tensor):
+        h = self.mem_mlp(s_market)  # [B, 32]
+        h = self.bn(h)
+        h = self.dropout(h)
+        logits = self.classifier(h) # [B,2]
+        regime_probs = torch.softmax(logits, dim=1)
+        return regime_probs, logits
+
 
 @NETS.register_module()
 class HCAR_Actor(nn.Module):
@@ -72,17 +106,25 @@ class HCAR_Actor(nn.Module):
             dropout=s_market_extractor_config['stock_pool_dropout']
         )
         # gate_controller_config 從主設定檔傳入
-        self.gate_controller_mlp = MemoryMLP(
-            dim=gate_controller_config['s_market_dim'],
-            depth=gate_controller_config['controller_depth'],
-            expansion_factor=gate_controller_config['controller_expansion_factor'],
-        )
-        self.cash_adjustment_scale = gate_controller_config['cash_adjustment_scale']
-        self.ema_alpha_gate = gate_controller_config['ema_alpha_gate']
+        # self.gate_controller_mlp = MemoryMLP(
+        #     dim=gate_controller_config['s_market_dim'],
+        #     depth=gate_controller_config['controller_depth'],
+        #     expansion_factor=gate_controller_config['controller_expansion_factor'],
+        # )
+        # self.cash_adjustment_scale = gate_controller_config['cash_adjustment_scale']
+        # self.ema_alpha_gate = gate_controller_config['ema_alpha_gate']
 
-        # 初始化EMA的state，用 register_buffer 使其成為模型狀態但不參與梯度計算
-        self.register_buffer('ema_stock_gate_prev', torch.tensor(0.5)) # 初始值設為中間值
-        self.register_buffer('ema_cash_adjust_prev', torch.tensor(0.0))
+        # # 初始化EMA的state，用 register_buffer 使其成為模型狀態但不參與梯度計算
+        # self.register_buffer('ema_stock_gate_prev', torch.tensor(0.5)) # 初始值設為中間值
+        # self.register_buffer('ema_cash_adjust_prev', torch.tensor(0.0))
+
+        # ===== 新增：條件化股票與現金的參數，用於根據 regime_probs 計算縮放與偏置 =====
+        # 3 個 market regime (0=Sideways, 1=Bull, 2=Bear)
+        self.num_regimes = 2
+        # 每種市場狀態下整體股票打分的縮放係數 (初始化為 1.0)
+        self.regime_stock_scales_actor = nn.Parameter(torch.ones(self.num_regimes, 1)) # 初始為 [[1],[1]]，表示二種市場預設下股票得分不縮放；訓練時，Actor 可學到在熊市把它調小、牛市調大。
+        # 每種市場狀態下的現金 logit 偏置 (初始化為 0.0)
+        self.regime_cash_biases_actor = nn.Parameter(torch.zeros(self.num_regimes, 1)) # 初始為 [[0],[0]]，表示二種市場預設下現金 logit 為 0；訓練時，Actor 可學到在熊市把它調大（誘導高現金比）或牛市給較小值。
 
         # 子模塊 3.B
 
@@ -101,21 +143,19 @@ class HCAR_Actor(nn.Module):
         self.fusion_method_for_scoring = fusion_method_for_scoring
         
         # --- 根據是否使用跳躍連接和融合方式，動態計算 AssetScoringHead 的輸入維度 ---
-        actual_scoring_head_input_dim = relational_hidden_dim # 默認情況 (只用 3.B 輸出)
-        
+        actual_scoring_head_input_dim = relational_hidden_dim
         if self.use_temporal_skip_to_scoring:
             if self.fusion_method_for_scoring == 'cat':
                 actual_scoring_head_input_dim = temporal_hidden_dim + relational_hidden_dim
             elif self.fusion_method_for_scoring == 'add':
-                # 如果是相加，需要確保維度一致
                 assert temporal_hidden_dim == relational_hidden_dim, \
-                    "For 'add' fusion, temporal_hidden_dim and relational_hidden_dim must be equal."
-                actual_scoring_head_input_dim = relational_hidden_dim # 或者 temporal_hidden_dim
-            # 可以根據需要添加其他融合方式的處理
+                    "For 'add' fusion, temporal_hidden_dim must equal relational_hidden_dim."
+                actual_scoring_head_input_dim = relational_hidden_dim
         # --------------------------------------------------------------------
                 
         self.asset_scoring_head = AssetScoringHead(
-            input_dim=actual_scoring_head_input_dim, # 輸入來自 3.B 的輸出
+            input_dim=actual_scoring_head_input_dim,
+            # input_dim=actual_scoring_head_input_dim+ self.num_regimes,
             hidden_layers_dims=scoring_mlp_hidden_dims,
             output_dim=1, # 每個股票一個評分
             dropout=scoring_dropout
@@ -124,17 +164,18 @@ class HCAR_Actor(nn.Module):
         self.output_final_weights = output_final_weights
         if self.output_final_weights:
             self.cash_bias_param = torch.nn.Parameter(torch.randn(1))
-
-    def forward(self, stock_observations, asset_mask=None, global_step=None, current_dynamic_supports=None):
-        # stock_observations: [batch_size, num_stocks, window_len, num_original_features]
-        # asset_mask: [batch_size, num_stocks]
-        # current_dynamic_supports: (可選) 如果模塊二提供了動態圖，可以在這裡傳入
-        # stock_observations: [batch_size, num_envs, num_stocks, window_len, num_original_features]
+        
+        self.print_xor = 0
+        
+    def forward(self, stock_observations,regime_probs , asset_mask=None, global_step=None, current_dynamic_supports=None):
         # 例如: [1, 1, 49, 10, 11] 在 explore_env 中
         # 或 [B, 1, 49, 10, 11] 在 update_net 中 (如果 buffer 存儲的是這種格式)
-        # print(current_dynamic_supports)
         # print(f"HCAR_Actor - Input stock_observations shape (original): {stock_observations.shape}")
-
+        '''
+        # stock_observations: [batch_size, num_stocks, window_len, num_original_features]
+        # regime_probs: [B, 3] (one-hot 或概率分佈，由 MarketNet 產生)
+        # asset_mask: [batch_size, num_stocks]
+        '''
         if stock_observations.dim() == 5 and stock_observations.size(1) == 1: # 檢查是否是 [B, 1, N, T, F]
             stock_observations_squeezed = stock_observations.squeeze(1)
             # print(f"HCAR_Actor - stock_observations shape after squeeze(1): {stock_observations_squeezed.shape}")
@@ -142,36 +183,37 @@ class HCAR_Actor(nn.Module):
             # 如果不是預期的5維且第二維為1，可能直接就是 [B, N, T, F]
             stock_observations_squeezed = stock_observations
             # print(f"HCAR_Actor - stock_observations shape (no squeeze needed or unexpected): {stock_observations_squeezed.shape}")
-        if global_step is not None:
+        if global_step is not None and global_step % 1000  == 0:
             wandb.log({
                 "HCAR_Actor/0_Input_Obs_Squeezed_Mean": stock_observations_squeezed.mean().item(),
                 "HCAR_Actor/0_Input_Obs_Squeezed_Std": stock_observations_squeezed.std().item(),
-            }, step=global_step)
+                "agent_step": global_step,
+            })
         # 子模塊 3.A
         h_temporal = self.temporal_feature_extractor(stock_observations_squeezed, global_step=global_step)
         # print(f"HCAR_Actor - Output from 3.A h_temporal mean: {h_temporal.mean().item()}")
         # print(f"HCAR_Actor - Output from 3.A h_temporal std: {h_temporal.std().item()}")
 
-        # Smarket
-        S_market = self.s_market_stock_pool(h_temporal) # [B, D_market]
-        gate_outputs = self.gate_controller_mlp(S_market) # [B, 2]
+        # # Smarket
+        # S_market = self.s_market_stock_pool(h_temporal) # [B, D_market]
+        # gate_outputs = self.gate_controller_mlp(S_market) # [B, 2]
 
-        raw_stock_gate = gate_outputs[:, 0:1]    # [B, 1]
-        raw_cash_adjust = gate_outputs[:, 1:2] # [B, 1]
+        # raw_stock_gate = gate_outputs[:, 0:1]    # [B, 1]
+        # raw_cash_adjust = gate_outputs[:, 1:2] # [B, 1]
 
-        current_stock_gate = torch.sigmoid(raw_stock_gate) # (0, 1)
-        current_cash_adjust = torch.tanh(raw_cash_adjust) * self.cash_adjustment_scale # (-scale, scale)
+        # current_stock_gate = torch.sigmoid(raw_stock_gate) # (0, 1)
+        # current_cash_adjust = torch.tanh(raw_cash_adjust) * self.cash_adjustment_scale # (-scale, scale)
 
-        # EMA 平滑 (僅在訓練時更新EMA，推理時使用最新的EMA值)
-        if self.training:
-            stock_gate_final = self.ema_alpha_gate * current_stock_gate + (1 - self.ema_alpha_gate) * self.ema_stock_gate_prev
-            cash_adjust_final = self.ema_alpha_gate * current_cash_adjust + (1 - self.ema_alpha_gate) * self.ema_cash_adjust_prev
-            # 更新 buffer 中的值 (in-place or reassign)
-            self.ema_stock_gate_prev = stock_gate_final.detach().mean() # 保存批次均值作為下一次的prev，或者每個樣本獨立EMA
-            self.ema_cash_adjust_prev = cash_adjust_final.detach().mean()
-        else: # 推理時
-            stock_gate_final = self.ema_stock_gate_prev.expand_as(current_stock_gate)
-            cash_adjust_final = self.ema_cash_adjust_prev.expand_as(current_cash_adjust)
+        # # EMA 平滑 (僅在訓練時更新EMA，推理時使用最新的EMA值)
+        # if self.training:
+        #     stock_gate_final = self.ema_alpha_gate * current_stock_gate + (1 - self.ema_alpha_gate) * self.ema_stock_gate_prev
+        #     cash_adjust_final = self.ema_alpha_gate * current_cash_adjust + (1 - self.ema_alpha_gate) * self.ema_cash_adjust_prev
+        #     # 更新 buffer 中的值 (in-place or reassign)
+        #     self.ema_stock_gate_prev = stock_gate_final.detach().mean() # 保存批次均值作為下一次的prev，或者每個樣本獨立EMA
+        #     self.ema_cash_adjust_prev = cash_adjust_final.detach().mean()
+        # else: # 推理時
+        #     stock_gate_final = self.ema_stock_gate_prev.expand_as(current_stock_gate)
+        #     cash_adjust_final = self.ema_cash_adjust_prev.expand_as(current_cash_adjust)
 
         # stock_gate_final 和 cash_adjust_final 將用於下一步
 
@@ -183,153 +225,188 @@ class HCAR_Actor(nn.Module):
         # --- 準備送入 AssetScoringHead 的特徵 (與 __init__ 中的邏輯對應) ---
         if self.use_temporal_skip_to_scoring:
             if self.fusion_method_for_scoring == 'cat':
-                combined_features_for_scoring = torch.cat([h_temporal, h_relational], dim=-1)
-            elif self.fusion_method_for_scoring == 'add':
-                combined_features_for_scoring = h_temporal + h_relational
-            else: 
-                combined_features_for_scoring = h_relational 
+                feat = torch.cat([h_temporal, h_relational], dim=-1)  # [B,N,D_temporal+D_rel]
+            else:  # add 拼法 (假設 D_temporal==D_rel)
+                feat = h_temporal + h_relational  # [B, N, D_rel]
         else:
-            combined_features_for_scoring = h_temporal
-        # -------------------------------------------------------------l
+            feat = h_relational
+
+            
+        # --- 準備送入 AssetScoringHead 的特徵，並拼接 regime_probs 作為條件信號 ---
+        B, N, D_rel = feat.shape  # h_relational: [B, N, D_rel (或 D_temporal+D_rel)]
+
+        # regime_probs: [B, 3] -> expand to [B, N, 3]
+        regime_context = regime_probs.unsqueeze(1).repeat(1, N, 1)  # [B,N,3]
+        # 然後把 regime_context 和 h_relational 拼在一起：
+        h_for_scoring = torch.cat([feat, regime_context], dim=-1)  # [B,N,(D_x)+3]
         
-        if global_step is not None:
+        if global_step is not None and global_step % 1000  == 0:
             wandb.log({
-                "HCAR_Actor/3C_Scoring/0a_Input_CombinedFeatures_Mean": combined_features_for_scoring.mean().item(),
-                "HCAR_Actor/3C_Scoring/0a_Input_CombinedFeatures_Std": combined_features_for_scoring.std().item(),
-            }, step=global_step)
+                "HCAR_Actor/3C_Scoring/0a_Input_CombinedFeatures_Mean": h_for_scoring.mean().item(),
+                "HCAR_Actor/3C_Scoring/0a_Input_CombinedFeatures_Std": h_for_scoring.std().item(),
+                "agent_step": global_step,
+            })
             
         # 子模塊 3.C
-        stock_logits = self.asset_scoring_head(combined_features_for_scoring, global_step=global_step)
-        adjusted_stock_logits = stock_logits * stock_gate_final # 股票 logits 被門控壓制
-
-        # 輸出 stock_logits: [batch_size, num_stocks]
+        stock_logits = self.asset_scoring_head(feat, global_step=global_step) # [batch_size, num_stocks]
         # print(f"HCAR_Actor - Output from 3.C (stock_logits shape): {stock_logits.shape}")
         
-        # 應用 mask (將無效股票的 logits 設為極小值)
+        # ─── 計算條件化縮放 α 與現金偏置 c ────────────────────────
+        # regime_probs: [B, 3]
+        # regime_stock_scales_actor: [3,1], regime_cash_biases_actor: [3,1]
+        alpha = regime_probs @ self.regime_stock_scales_actor  # [B,1]
+        c = regime_probs @ self.regime_cash_biases_actor       # [B,1]
+
+
+        if global_step is not None and global_step % 1000  == 0:
+            wandb.log({
+                "HCAR_Actor_Logits/stock_logits_std": stock_logits.std().item(),
+                "HCAR_Actor_Logits/stock_logits_mean": stock_logits.mean().item(),
+                "HCAR_Actor_Logits/cash_logit_c_std": c.std().item(), # c is likely [B,1]
+                "HCAR_Actor_Logits/cash_logit_c_mean": c.mean().item(), # c is likely [B,1]
+                "agent_step": global_step,
+            })
+        
+        # 在 HCAR_Actor forward 中臨時修改：
+        # alpha = torch.ones_like(alpha) # 強制 alpha 為 1
+        # c = torch.zeros_like(c)     # 強制 c 為 0
+        # scaled_stock_logits: [B, N]
+        scaled_stock_logits = stock_logits * alpha
+
+        # 如有 asset_mask，將被屏蔽的股票 logits 設為 -inf（或非常小）
         if asset_mask is not None:
-            if adjusted_stock_logits.device != asset_mask.device:
-                asset_mask = asset_mask.to(adjusted_stock_logits.device)
-            adjusted_stock_logits[asset_mask] = -torch.finfo(adjusted_stock_logits.dtype).max
+            if scaled_stock_logits.device != asset_mask.device:
+                asset_mask = asset_mask.to(scaled_stock_logits.device)
+            scaled_stock_logits = scaled_stock_logits.masked_fill(asset_mask, float('-1e9'))
 
-        if self.output_final_weights:
-            cash_bias_repeated = self.cash_bias_param.repeat(stock_logits.shape[0], 1)# [B, 1]
-            adjusted_cash_logit = cash_bias_repeated + cash_adjust_final
+        # ─── 拼接股票 logits 與現金 logit，再做 softmax ─────────────────
+        combined_logits = torch.cat([scaled_stock_logits, c], dim=1)  # [B, N+1]
+        action_probs = torch.softmax(combined_logits, dim=1)         # [B, N+1], Σ=1
+        if global_step is not None:
+            if (global_step ^ self.print_xor) == 0:
+                if self.print_xor % 3000 == 0:
+                    print("global_step:",global_step)
+                    print("combined_logits:",combined_logits)
+                    print("action_probs:",action_probs)
+                self.print_xor +=1
+        if global_step is None:
+            print("combined_logits:",combined_logits)
+            print("action_probs:",action_probs)
+        if global_step is not None and global_step % 1000 == 0:
+            wandb.log({
+                "HCAR_Actor_Logits/scaled_stock_after_logits_mean": scaled_stock_logits.mean().item(),
+                "HCAR_Actor_Logits/scaled_stock_after_logits_std": scaled_stock_logits.std().item(),
+                "HCAR_Actor_Logits/cash_logit_after_c_mean": c.mean().item(), # c is likely [B,1]
+        
+                
+                "HCAR_Actor/4_ActionProbs_Mean": action_probs.mean().item(),
+                "HCAR_Actor/4_ActionProbs_Std": action_probs.std().item(),
+                "agent_step": global_step,
+            })
 
-            if stock_logits.device != adjusted_cash_logit.device:
-                adjusted_cash_logit = adjusted_cash_logit.to(stock_logits.device)
-            
-            final_logits = torch.cat([adjusted_stock_logits, adjusted_cash_logit], dim=1) # [B, N+1]
-            action_probabilities = torch.softmax(final_logits, dim=1)
-            # print(f"HCAR_Actor - Final action_probabilities shape: {action_probabilities.shape}")
-            if global_step is not None:
-                wandb.log({
-                    "HCAR_Actor/4_Final_ActionProbs_Mean": action_probabilities.mean().item(),
-                    "HCAR_Actor/4_Final_ActionProbs_Std": action_probabilities.std().item(),
-                    "HCAR_Actor/4_CashBias_Value": self.cash_bias_param.item(),
-                    
-                    "Market/S_market_Mean": S_market.mean().item(), # 假設 S_market 在此 scope 可用
-                    "Market/Stock_Gate_EMA_Mean": stock_gate_final.mean().item(),
-                    "Market/Cash_Adjust_EMA_Mean": cash_adjust_final.mean().item(),
-                    "Market/Raw_Stock_Gate_Mean": current_stock_gate.mean().item(),    # Log EMA之前的
-                    "Market/Raw_Cash_Adjust_Mean": current_cash_adjust.mean().item(), # Log EMA之前的
-      
-                }, step=global_step)
-            
-            return action_probabilities, S_market
-        else:
-            # print(f"HCAR_Actor - Returning raw stock_logits shape: {stock_logits.shape}")
-            return stock_logits
+        return action_probs, regime_probs # 返回：action_probs 與 regime_probs（後續 Critic 需要 regime_probs）
 
 # 在 trademaster/nets/HCAR.py 的 HCAR_Critic 類的 __init__ 方法中
 
 @NETS.register_module()
-class HCAR_Critic(Net):
+class HCAR_Critic(Net): # 確保繼承自 Net (如果 Net 是你的基礎網路類)
     def __init__(self,
-                 input_dim,           # 每支股票的原始特征维度 F_in
-                 action_dim,          # 股票数量 N
+                 input_dim,          # 每支股票的原始特征维度 F_in (由環境的 state_dim 提供)
+                 action_dim,         # 股票数量 N (由環境的 action_dim 提供)
+                 time_steps,         # 時間窗口長度 (由環境的 time_steps 提供)
+                 num_regimes,        # <--- 修改點: MarketNet 輸出的 regime_probs 的維度 (例如 2 或 3)
                  output_dim=1,
-                 time_steps=10,
-                 num_layers=1,
-                 hidden_size=32,
-                 s_market_dim=1       # 只用 1 维宏观信号即可
+                 num_layers=1,       # LSTM layers
+                 hidden_size=32,     # LSTM hidden_size
                  ):
         super(HCAR_Critic, self).__init__()
 
         self.time_steps = time_steps
-        self.s_market_dim = s_market_dim
         self.num_stocks = action_dim  # N
+        self.num_regimes = num_regimes # <--- 新增: 存儲 regime 維度
 
-        # —— LSTM 部分，跟原来一样 ——  
+        # --- LSTM 部分 ---
+        # input_dim 這裡指的是單個股票的原始特徵維度 (F_in)
+        # LSTM 的 input_size 應該是 T * F_in
         self.lstm = nn.LSTM(
-            input_size=input_dim * time_steps,
+            input_size=input_dim * time_steps, # 確保 input_dim 是 F_in
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True
         )
-        # 把 LSTM 隐藏向量压成 1 维
-        self.linear1 = nn.Linear(hidden_size, output_dim)
-        self.act = nn.ReLU()
+        self.linear1 = nn.Linear(hidden_size, output_dim) # output_dim 通常是 1
+        self.relu_act = nn.ReLU() # 重命名以避免與 agent.act 衝突
 
-        # 计算 linear2 的输入总维度：
-        #  1) 每支股票压成 1 维后会得到 [B, N]，共 N 个数  
-        #  2) para：1 维  
-        #  3) action a： [B, N+1]  
-        #  4) 如果 s_market_dim>0，还要加上 [B, s_market_dim]  
-        in_features_linear2 = action_dim            # [B, N]
-        in_features_linear2 += 1                     # para (1 维)
-        in_features_linear2 += (action_dim + 1)      # a (N+1 维)
-        in_features_linear2 += self.s_market_dim     # [B, s_market_dim]
+        # --- 計算最終線性層 linear2 的輸入維度 ---
+        # 1) x_flat: 每個股票LSTM處理後再經過linear1得到的維度 (N * output_dim, output_dim 通常是 1, 所以是 N)
+        #    如果 self.linear1 的 output_dim 是 1, 那麼 x_flat 的維度是 N * 1 = N
+        in_features_x_flat = self.num_stocks * output_dim
 
-        self.linear2 = nn.Linear(in_features_linear2, 1)
+        # 2) para: 1 維
+        in_features_para = 1
+
+        # 3) action a: [B, N+1] (N+1 維)
+        in_features_action = self.num_stocks + 1
+
+        # 4) regime_probs: [B, num_regimes] (num_regimes 維)
+        in_features_regime = self.num_regimes
+
+        total_in_features_linear2 = in_features_x_flat + \
+                                    in_features_para + \
+                                    in_features_action + \
+                                    in_features_regime
+        
+        self.linear2 = nn.Linear(total_in_features_linear2, 1) # 最終輸出 Q 值
         self.para = torch.nn.Parameter(torch.ones(1).requires_grad_())
 
-    def forward(self, x: torch.Tensor, a: torch.Tensor, s_market: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, a: torch.Tensor, regime_probs: torch.Tensor) -> torch.Tensor:
         """
-        x: [B, N, T, F_in]
-        a: [B, N+1]
-        s_market: [B, s_market_dim] 或 None
+        x: 股票觀測值 [B, N, T, F_in] (N=num_stocks, T=time_steps, F_in=input_dim_per_stock)
+        a: 投資組合動作 [B, N+1]
+        regime_probs: 市場狀態概率 [B, num_regimes]
         """
+        B = x.shape[0] # 獲取 batch_size
 
-        # 1. 如果 x 是 4 维以上，就把它 reshape 成 [B, N, T*F_in]
-        if len(x.shape) >= 4:
-            B, N, T, F_in = x.shape
-            x_lstm = x.view(B, N, -1)
+        # 1. LSTM 處理每個股票的時序特徵
+        # x 的原始形狀是 [B, N, T, F_in]
+        # LSTM期望輸入 [B*N, T, F_in] 或 [B, N, T*F_in] 取決於設計
+        # 你的 LSTM input_size = input_dim * time_steps，且 batch_first=True
+        # 所以 LSTM 輸入應為 [B, N, T*F_in]
+        
+        # 確認 x 的維度
+        if x.dim() == 4: # [B, N, T, F_in]
+            #  N = x.shape[1] # num_stocks
+            #  T = x.shape[2] # time_steps
+            #  F_in = x.shape[3] # features_per_stock
+            #  x_lstm_input = x.reshape(B * N, T, F_in) # 如果LSTM逐個處理股票
+            x_lstm_input = x.view(B, self.num_stocks, -1) # [B, N, T*F_in]
+        elif x.dim() == 3: # 假設已經是 [B, N, T*F_in]
+            x_lstm_input = x
         else:
-            # 如果 x 本来就是 [B, N, T*F_in]，直接用
-            x_lstm = x
-            B, N, T_and_F = x_lstm.shape[:3]
-            N = self.num_stocks
+            raise ValueError(f"Unsupported input shape for x: {x.shape}")
 
-        # 2. LSTM 正向
-        #    lstm_out: [B, N, hidden_size]
-        lstm_out, _ = self.lstm(x_lstm)
+        lstm_out, _ = self.lstm(x_lstm_input)  # lstm_out: [B, N, hidden_size]
+        
+        # 2. 將 LSTM 輸出通過 linear1 和激活函數
+        x1 = self.linear1(lstm_out)  # x1: [B, N, output_dim_linear1] (output_dim_linear1 通常是 1)
+        x1 = self.relu_act(x1)
 
-        # 3. linear1 + ReLU，把 hidden_size→1
-        #    x1: [B, N, 1] → ReLU → [B, N, 1]
-        x1 = self.linear1(lstm_out)
-        x1 = self.act(x1)
+        # 3. Flatten x1 準備拼接
+        x_flat = x1.view(B, -1)  # x_flat: [B, N * output_dim_linear1]
 
-        # 4. view 成 [B, N]
-        x_flat = x1.view(B, N)
+        # 4. 準備 para
+        para_rep = self.para.repeat(B, 1)  # para_rep: [B, 1]
 
-        # 5. para 复制成 [B, 1]
-        para_rep = self.para.repeat(B, 1)  # [B,1]
+        # 5. 檢查 regime_probs 的形狀
+        assert regime_probs.shape == (B, self.num_regimes), \
+               f"Critic: Expected regime_probs shape [B, {self.num_regimes}], but got {regime_probs.shape}"
 
-        # 6. 最后拼接
-        #    如果有 s_market_dim>0 且 s_market 传进来了，就把它拼进去
-        if (self.s_market_dim > 0) and (s_market is not None):
-            # 确保形状正确
-            assert s_market.shape == (B, self.s_market_dim), \
-                f"Critic 期望 s_market 形状 [B, {self.s_market_dim}]，但收到 {tuple(s_market.shape)}"
-            combined = torch.cat((x_flat, para_rep, a, s_market), dim=1)
-            # combined → [B, N + 1 + (N+1) + s_market_dim] = [B, 2N+2 + s_market_dim]
-        else:
-            # 默认还是跟原来一样，只拼 x_flat、para、a
-            combined = torch.cat((x_flat, para_rep, a), dim=1)
-            # combined → [B, N + 1 + (N+1)] = [B, 2N+2]
+        # 6. 拼接所有特徵
+        combined = torch.cat((x_flat, para_rep, a, regime_probs), dim=1)
+        # 預期維度: (N*output_dim_linear1) + 1 + (N+1) + num_regimes
 
-        # 7. linear2 输出 Q
-        q_value = self.linear2(combined)  # [B, 1]
+        # 7. 通過最終的線性層得到 Q 值
+        q_value = self.linear2(combined)  # q_value: [B, 1]
         return q_value
 
 
