@@ -165,7 +165,7 @@ class PortfolioManagementEIIETrainer(Trainer):
             torch.set_grad_enabled(True)
             logging_tuple = self.agent.update_net(buffer)
             torch.set_grad_enabled(False)
-            time.sleep(8)
+            time.sleep(10)
             if torch.mean(buffer_items.undone) < 1.0:
                 print("Valid Episode: [{}/{}]".format(epoch, self.epochs))
                 state = self.valid_environment.reset()

@@ -25,7 +25,7 @@ class PortfolioManagementDataset(CustomDataset):
         self.test_dynamic_path=osp.join(ROOT, get_attr(kwargs, "test_dynamic_path", None))
         test_dynamic=int(get_attr(kwargs, "test_dynamic", "-1"))
         if test_dynamic!=-1:
-            length_day= get_attr(kwargs, "length_day", 0)
+            time_steps= get_attr(kwargs, "time_steps", 0)
             self.test_dynamic_paths=[]
             data = pd.read_csv(self.test_dynamic_path)
             data = data.reset_index()
@@ -53,14 +53,14 @@ class PortfolioManagementDataset(CustomDataset):
                 data_temp.index = index_by_tick_list[i]
                 path=osp.join(ROOT,temp_foler,str(test_dynamic) + '_' + str(i) + '.csv')
                 data_temp.to_csv(path)
-                if max(index_by_tick_list[i]) + 1 <= length_day:
+                if max(index_by_tick_list[i]) + 1 <= time_steps:
                     print('The ' + str(i) + '_th segment length is less than the min length so it won\'t be tested')
                     continue
                 self.test_dynamic_paths.append(path)
 
         self.tech_indicator_list = get_attr(kwargs, "tech_indicator_list", [])
         self.initial_amount = get_attr(kwargs, "initial_amount", 100000)
-        self.length_day = get_attr(kwargs, "length_day", 10)
+        self.time_steps = get_attr(kwargs, "time_steps", 10)
         self.transaction_cost_pct = get_attr(kwargs, "transaction_cost_pct", 0.001)
 
     def get_styled_intervals_and_gives_new_index(self, data):
