@@ -31,9 +31,11 @@ class EIIEConv(Net):
         x = self.net(x)
         x = x.view(x.shape[0], -1)
 
+        # print("combined_logits:",x)
         para = self.para.repeat(x.shape[0], 1)
         x = torch.cat((x, para), dim=1)
         x = torch.softmax(x, dim=1)
+        # print("action_probs:",x)
         return x
 
 @NETS.register_module()

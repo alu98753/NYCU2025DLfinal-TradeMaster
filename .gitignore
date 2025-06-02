@@ -18,3 +18,5 @@
 *.pth
 *.pkl
 *.png
+*.log
+wandb*

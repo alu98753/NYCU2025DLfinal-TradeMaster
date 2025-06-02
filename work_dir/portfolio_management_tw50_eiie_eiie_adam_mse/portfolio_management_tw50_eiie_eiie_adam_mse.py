@@ -12,6 +12,7 @@ data = dict(
     initial_amount=100000,
     transaction_cost_pct=0.001,
     test_dynamic_path='data/portfolio_management/tw50/test_with_label.csv',
+    start_date_filter='2020-01-01',
     test_dynamic='-1')
 environment = dict(type='PortfolioManagementEIIEEnvironment')
 agent = dict(

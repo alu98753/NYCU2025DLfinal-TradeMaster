@@ -30,7 +30,8 @@ data = dict(
     ],
     length_day=10,
     initial_amount=100000,
-    transaction_cost_pct=0.001)
+    transaction_cost_pct=0.001,
+    start_date_filter='2020-01-01',)
 
 environment = dict(type='PortfolioManagementEIIEEnvironment')
 transition = dict(

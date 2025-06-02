@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+import time
 
 ROOT = Path(__file__).resolve().parents[3]
 from ..custom import Trainer
@@ -164,7 +165,7 @@ class PortfolioManagementEIIETrainer(Trainer):
             torch.set_grad_enabled(True)
             logging_tuple = self.agent.update_net(buffer)
             torch.set_grad_enabled(False)
-
+            time.sleep(8)
             if torch.mean(buffer_items.undone) < 1.0:
                 print("Valid Episode: [{}/{}]".format(epoch, self.epochs))
                 state = self.valid_environment.reset()

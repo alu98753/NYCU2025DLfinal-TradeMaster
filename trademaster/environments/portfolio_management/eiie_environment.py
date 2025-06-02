@@ -54,7 +54,13 @@ class PortfolioManagementEIIEEnvironment(Environments):
         
         # Store the original df only if an exact copy is needed elsewhere
         # self.df_raw = df.copy()
-
+        start_date_filter = str(get_attr(kwargs, "start_date_filter", "2020-01-01")) # 從 kwargs 讀取，預設為不篩選或早期日期
+        if start_date_filter:
+            df['date'] = pd.to_datetime(df['date']) # 確保 date 列是 datetime 對象
+            df = df[df['date'] >= pd.to_datetime(start_date_filter)]
+            df['date'] = df['date'].dt.strftime('%Y-%m-%d') # 轉換回字串格式，如果後續代碼需要
+            if df.empty:
+                raise ValueError(f"No data remaining after filtering with start_date_filter: {start_date_filter} for {self.df_path}")
         # --- NumPy Data Pre-processing ---
         self.unique_dates = sorted(df['date'].unique())
         self.unique_tics = sorted(df['tic'].unique())
