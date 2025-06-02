@@ -98,8 +98,8 @@ def main():
                                                                                     task_index=i,work_dir=cfg.work_dir)))
 
     action_dim = train_environment.action_dim # 29
-    state_dim = train_environment.state_dim # 11
-    input_dim = len(train_environment.tech_indicator_list)
+    state_dim = train_environment.state_dim # 11 # This should now be F_original + 2
+    input_dim = state_dim
     time_steps = train_environment.time_steps
 
     cfg.act.update(dict(input_dim=input_dim, time_steps=time_steps))

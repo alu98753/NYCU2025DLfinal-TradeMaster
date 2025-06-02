@@ -14,7 +14,8 @@ from gym import spaces
 from collections import OrderedDict
 import pickle
 import os.path as osp
-
+import os
+import time
 
 @ENVIRONMENTS.register_module()
 class PortfolioManagementEIIEEnvironment(Environments):
@@ -94,12 +95,16 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.action_space_shape = self.stock_dim 
         
         self.action_space = spaces.Box(low=-5, high=5, shape=(self.action_space_shape,))
-        self.observation_space = spaces.Box(low=-np.inf,high=np.inf,
-            shape=(self.stock_dim, self.time_steps,self.num_tech_indicators) )
 
         self.action_dim = self.action_space.shape[0]
-        self.state_dim = self.num_tech_indicators
+        # <<< MODIFICATION START: Update state_dim for new features >>>
+        self.original_feature_dim = self.num_tech_indicators
+        self.state_dim = self.original_feature_dim + 2 # Add 2 for prev_stock_weight and prev_cash_weight
+        
+        self.observation_space = spaces.Box(low=-np.inf,high=np.inf,
+            shape=(self.stock_dim, self.time_steps,self.state_dim) )
 
+        # <<< MODIFICATION END >>>
         self.day_idx = self.time_steps - 1 
 
         start_slice_idx = self.day_idx - self.time_steps + 1
@@ -111,13 +116,6 @@ class PortfolioManagementEIIEEnvironment(Environments):
             padding_array = np.zeros((padding_needed, self.stock_dim, self.num_tech_indicators), dtype=np.float32)
             state_window_data = np.concatenate((padding_array, state_window_data), axis=0)
         
-        raw_state_format = np.transpose(state_window_data, (1, 2, 0))
-        self.state = np.transpose(raw_state_format, (0, 2, 1))
-
-        self.terminal = False
-        self.portfolio_value = float(self.initial_amount)
-        self.asset_memory = [float(self.initial_amount)]
-        self.portfolio_return_memory = [0.0]
         
         # <<< MODIFICATION START: Initialize active_target_weights >>>
         # These are the weights that are "live" in the market.
@@ -126,11 +124,74 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.active_target_weights = np.array([initial_active_weight_val] * (self.stock_dim + 1), dtype=np.float32)
         self.weights_memory = [self.active_target_weights.tolist()] # Store the initial active weights
         # <<< MODIFICATION END >>>
+        
+        raw_state_format = np.transpose(state_window_data, (1, 2, 0))
+        # self.state = np.transpose(raw_state_format, (0, 2, 1))
+        self.state = self._get_augmented_state() # Use a helper function
+
+        self.terminal = False
+        self.portfolio_value = float(self.initial_amount)
+        self.asset_memory = [float(self.initial_amount)]
+        self.portfolio_return_memory = [0.0]
 
         self.date_memory = [self.unique_dates[self.day_idx]]
         self.transaction_cost_memory = [] 
         self.test_id = 'agent'
+        
+        # log file
+        self.txt = "work_dir/portfolio_management_tw50_eiie_eiie_adam_mse/metrics.txt"
+        os.makedirs(os.path.dirname(self.txt), exist_ok=True)
+        self.empty = True        
+                
 
+    def _get_augmented_state(self) -> np.ndarray:
+        # Get original market features for the window
+        start_slice_idx = self.day_idx - self.time_steps + 1
+        end_slice_idx = self.day_idx + 1 # slice up to current day_idx
+        actual_start_idx = max(0, start_slice_idx)
+        
+        # state_window_data_original: [current_slice_len, N, F_original]
+        state_window_data_original = self.data_cube[actual_start_idx:end_slice_idx, :, :]
+
+        # Pad if history is shorter than time_steps
+        if state_window_data_original.shape[0] < self.time_steps:
+            padding_needed = self.time_steps - state_window_data_original.shape[0]
+            padding_array = np.zeros(
+                (padding_needed, self.stock_dim, self.original_feature_dim), # Use original_feature_dim
+                dtype=np.float32
+            )
+            state_window_data_original = np.concatenate((padding_array, state_window_data_original), axis=0)
+        # state_window_data_original is now [T, N, F_original]
+
+        # Prepare w_{t-1} features
+        # self.active_target_weights are the weights that were active leading to the current state
+        prev_cash_w = self.active_target_weights[0]
+        prev_stock_ws = self.active_target_weights[1:] # Shape [N]
+
+        # Tile prev_cash_w to shape [T, N, 1]
+        w_cash_t_minus_1_feature = np.full(
+            (self.time_steps, self.stock_dim, 1),
+            prev_cash_w,
+            dtype=np.float32
+        )
+
+        # Tile each stock's prev_stock_w to shape [T, N, 1]
+        w_stocks_t_minus_1_feature = np.zeros(
+            (self.time_steps, self.stock_dim, 1),
+            dtype=np.float32
+        )
+        for i in range(self.stock_dim):
+            w_stocks_t_minus_1_feature[:, i, 0] = prev_stock_ws[i]
+
+        # Concatenate: [T, N, F_original + 2]
+        state_window_data_augmented = np.concatenate(
+            (state_window_data_original, w_cash_t_minus_1_feature, w_stocks_t_minus_1_feature),
+            axis=2
+        )
+
+        # Transpose to agent's expected input format: [N, T, F_new]
+        final_state = np.transpose(state_window_data_augmented, (1, 0, 2))
+        return final_state.astype(np.float32)
 
     def reset(self):
         self.day_idx = self.time_steps - 1
@@ -145,14 +206,6 @@ class PortfolioManagementEIIEEnvironment(Environments):
             padding_array = np.zeros((padding_needed, self.stock_dim, self.num_tech_indicators), dtype=np.float32)
             state_window_data = np.concatenate((padding_array, state_window_data), axis=0)
 
-        raw_state_format = np.transpose(state_window_data, (1, 2, 0))
-        self.state = np.transpose(raw_state_format, (0, 2, 1))
-
-        self.terminal = False
-        self.portfolio_value = float(self.initial_amount)
-        self.asset_memory = [float(self.initial_amount)]
-        self.portfolio_return_memory = [0.0]
-        
         # <<< MODIFICATION START: Reset active_target_weights and rebalance counter >>>
         initial_active_weight_val = 1.0 / (self.stock_dim + 1)
         self.active_target_weights = np.array([initial_active_weight_val] * (self.stock_dim + 1), dtype=np.float32)
@@ -160,10 +213,20 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.days_since_last_rebalance = 0
         # <<< MODIFICATION END >>>
 
+
+        raw_state_format = np.transpose(state_window_data, (1, 2, 0))
+        self.state = self._get_augmented_state() # Use helper method
+
+        self.terminal = False
+        self.portfolio_value = float(self.initial_amount)
+        self.asset_memory = [float(self.initial_amount)]
+        self.portfolio_return_memory = [0.0]
+        
+
         self.date_memory = [self.unique_dates[self.day_idx]]
         self.transaction_cost_memory = []
         
-        return self.state.astype(np.float32)
+        return self.state
 
     def step(self, weights_from_agent: np.ndarray): # weights_from_agent is the action proposed by actor
         weights_from_agent = np.asarray(weights_from_agent, dtype=np.float32)
@@ -189,7 +252,17 @@ class PortfolioManagementEIIEEnvironment(Environments):
             )
             table = print_metrics(stats)
             print(table)
-
+            if self.task.startswith("train") or self.task.startswith("valid"):
+                if self.empty:
+                    open(self.txt, "w").close()  # 清空檔案
+                    self.empty = False
+            
+                with open(self.txt, "a", encoding="utf-8") as f:
+                    if (self.task.startswith("valid")):
+                        f.write("Valid Episode: " + "\n")
+                    if (self.task.startswith("train")):
+                        f.write("Train Episode: " + "\n")
+                    f.write(str(table) + "\n")
             df_return = self.save_portfolio_return_memory()
             daily_return_values = df_return.daily_return.values
             df_value = self.save_asset_memory()
@@ -306,14 +379,14 @@ class PortfolioManagementEIIEEnvironment(Environments):
             padding_array = np.zeros((padding_needed, self.stock_dim, self.num_tech_indicators), dtype=np.float32)
             state_window_data = np.concatenate((padding_array, state_window_data), axis=0)
         raw_state_format = np.transpose(state_window_data, (1, 2, 0))
-        self.state = np.transpose(raw_state_format, (0, 2, 1))
+        self.state = self._get_augmented_state() # Use helper method
         
         info_dict = {
             "drifted_weights_eod": drifted_weights.tolist(),
             "agent_target_if_rebalanced": weights_from_agent.tolist() if (self.days_since_last_rebalance == 0) else None,
             "active_weights_next_period": self.active_target_weights.tolist()
         }
-        return self.state.astype(np.float32), float(self.reward), self.terminal, info_dict
+        return self.state, float(self.reward), self.terminal, info_dict
 
     def normalization(self, actions: np.ndarray) -> np.ndarray:
         actions = np.asarray(actions, dtype=np.float32)

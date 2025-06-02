@@ -108,25 +108,65 @@ class EIIEConv(Net): # This is your Transformer Actor
         logits_flat = self.scoring_head(pooled_output) # Shape: [B*N, 1]
         
         stock_logits = logits_flat.view(B, N) # Shape: [B, N]
-        
         # Expand cash_bias_parameter to match batch size
         cash_bias_expanded = self.cash_bias_parameter.expand(B, 1)
-        print("before combine:",stock_logits, "max:",stock_logits.max(), "min:",stock_logits.min())
 
-        # Concatenate stock logits with the cash bias
-        combined_logits = torch.cat((stock_logits, cash_bias_expanded), dim=1) # Shape: [B, N+1]
-        # print("before temperature: ",stock_logits.detach().cpu().numpy().round(4), "max:", stock_logits.max().item(), "min:", stock_logits.min().item())
+        # Concatenate stock logits with the cash bias (for print/debugging)
+        combined_logits = torch.cat((stock_logits, cash_bias_expanded), dim=1)
 
-        # Optional: Temperature scaling (can be learned or fixed)
-        temperature =1 # Example fixed temperature
-        combined_logits = combined_logits / temperature
-        # print("after temperature: ",stock_logits.detach().cpu().numpy().round(4), "max:", stock_logits.max().item(), "min:", stock_logits.min().item())
+        print("\n===== LOGIT INFO =====")
+        print("Raw stock_logits:", stock_logits.detach().cpu().numpy().round(4))
+        print("Cash bias:", self.cash_bias_parameter.item())
 
-        action_probs = torch.softmax(combined_logits, dim=1) # Shape: [B, N+1]
-        action_probs_np = action_probs.detach().cpu().numpy()[0].flatten() 
-        print("after softmax:",action_probs, "max:",action_probs.max(),"Second :",np.partition(action_probs_np, -2)[-2],"third :",np.partition(action_probs_np, -3)[-3], "min:",action_probs.min())
+        # ---- Custom Top-5 Logic Start ----
+        top_k = 10
+        topk_vals, topk_indices = torch.topk(stock_logits, top_k, dim=1)  # Shape: [B, 5]
+
+        # Apply softmax on top-k logits only
+        topk_softmax = torch.softmax(topk_vals, dim=1)  # Shape: [B, 5]
+        topk_scaled = topk_softmax * 0.9  # Rescale to sum to 0.9
+        # Create zero tensor for all stocks
+        stock_weights = torch.zeros_like(stock_logits)  # Shape: [B, N]
+
+        # bocast weight
+        for i in range(B):
+            stock_weights[i].scatter_(0, topk_indices[i], topk_scaled[i])
+            
+        # Logging only batch 0
+        order = torch.argsort(topk_indices[0], descending=True)
+        print(f"\nBatch {0} Top-{top_k} Indices:", topk_indices[0][order].tolist())
+        print(f"Batch {0} Top-{top_k} Weights:", [round(float(x), 4) for x in topk_scaled[0][order]])
+        print(f"Batch {0} Sum of Top-{top_k} Weights: {topk_scaled[0].sum().item():.4f}")
+
+        # Cash gets the remaining 0.1
+        cash_weight = torch.full((B, 1), 0.1, device=stock_logits.device)
+
+        # Combine stock weights and cash
+        action_probs = torch.cat([stock_weights, cash_weight], dim=1)  # Shape: [B, N+1]
+
+        print("\nFinal action_probs:", action_probs.detach().cpu().numpy().round(4))
+        print("Sum of action_probs (should be 1.0):", action_probs.sum(dim=1).detach().cpu().numpy().round(4))
+        # ---- Custom Top-5 Logic End ----
+
+        return action_probs        
+        # Expand cash_bias_parameter to match batch size
+        # cash_bias_expanded = self.cash_bias_parameter.expand(B, 1)
+        # # print("before combine:",stock_logits, "max:",stock_logits.max(), "min:",stock_logits.min())
+
+        # # Concatenate stock logits with the cash bias
+        # combined_logits = torch.cat((stock_logits, cash_bias_expanded), dim=1) # Shape: [B, N+1]
+        # # print("before temperature: ",stock_logits.detach().cpu().numpy().round(4), "max:", stock_logits.max().item(), "min:", stock_logits.min().item())
+
+        # # Optional: Temperature scaling (can be learned or fixed)
+        # temperature =1 # Example fixed temperature
+        # combined_logits = combined_logits / temperature
+        # # print("after temperature: ",stock_logits.detach().cpu().numpy().round(4), "max:", stock_logits.max().item(), "min:", stock_logits.min().item())
+
+        # action_probs = torch.softmax(combined_logits, dim=1) # Shape: [B, N+1]
+        # action_probs_np = action_probs.detach().cpu().numpy()[0].flatten() 
+        # # print("after softmax:",action_probs, "max:",action_probs.max(),"Second :",np.partition(action_probs_np, -2)[-2],"third :",np.partition(action_probs_np, -3)[-3], "min:",action_probs.min())
         
-        return action_probs
+        # return action_probs
 
 
 @NETS.register_module()

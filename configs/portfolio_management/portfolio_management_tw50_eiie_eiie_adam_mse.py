@@ -28,14 +28,14 @@ data = dict(
         'zopen', 'zhigh', 'zlow', 'zadjcp', 'zclose',
         'zd_5', 'zd_10', 'zd_15', 'zd_20', 'zd_25', 'zd_30'
     ],
-    time_steps=15,
+    time_steps=30,
     initial_amount=100000,
-    transaction_cost_pct=0.001,
+    transaction_cost_pct=0.000,
     start_date_filter='2018-01-01',)
 
 environment = dict(
     type='PortfolioManagementEIIEEnvironment',
-    rebalance_interval=7,
+    rebalance_interval=15,
     start_date_filter='2018-01-01',
 )
 transition = dict(
@@ -49,7 +49,7 @@ agent = dict(
 
 trainer = dict(
     type='PortfolioManagementEIIETrainer',
-    epochs=5,
+    epochs=10,
     work_dir=work_dir,
     if_remove=False )
 
@@ -68,7 +68,7 @@ AdamW 優化器：對於 Transformer，AdamW 通常比 Adam 表現更好，因�
 #     type = "EIIEConv",
 #     input_dim = None,
 #     output_dim=1,
-#     time_steps=15,
+#     time_steps=10,
 #     kernel_size=3,
 #     dims = [32]
 # )
@@ -78,7 +78,7 @@ act = dict(
 
     # --- 核心輸入維度 (通常由你的訓練腳本動態填充) ---
     input_dim = None,                       
-    time_steps=15,                    
+    time_steps=10,                    
     # --- Transformer Encoder 主要參數 ---
     d_model = 64,                      # Transformer 內部的主要維度 (embedding dim)
     n_heads = 4,                        # 多頭注意力機制的頭數 (需確保 d_model % n_heads == 0)
