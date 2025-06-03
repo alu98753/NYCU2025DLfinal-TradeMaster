@@ -4,6 +4,7 @@ from .deeptrader import AssetScoringValueNet
 from .deeptrader import MarketScoringNet
 from .eiie import EIIEConv
 from .eiie import EIIECritic
+from .eiie import MarketNet
 from .sarl import LSTMClf
 from .sarl import mLSTMClf
 from .eteo import ETEOStacked

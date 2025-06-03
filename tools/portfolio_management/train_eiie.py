@@ -98,7 +98,7 @@ def main():
                                                                                     task_index=i,work_dir=cfg.work_dir)))
 
     action_dim = train_environment.action_dim # 29
-    state_dim = train_environment.state_dim # 11 # This should now be F_original + 2
+    state_dim = train_environment.state_dim # 11 # This should now be F_original + 2 = 13
     input_dim = state_dim
     time_steps = train_environment.time_steps
 
@@ -107,7 +107,18 @@ def main():
 
     act = build_net(cfg.act)
     cri = build_net(cfg.cri)
-
+    # <<< 新增：構建 MarketNet >>>
+    # MarketNet 的 input_s_market_dim 應該等於 Actor 的 d_model
+    # 確保配置文件中 market_net.input_s_market_dim 與 act.d_model 一致
+    if 'market_net' not in cfg:
+        raise ValueError("MarketNet configuration is missing in the config file.")
+    if cfg.act.d_model != cfg.market_net.input_s_market_dim:
+        print(f"Warning: act.d_model ({cfg.act.d_model}) != market_net.input_s_market_dim ({cfg.market_net.input_s_market_dim}). Check config.")
+        # 可以選擇強制賦值：
+        # cfg.market_net.input_s_market_dim = cfg.act.d_model
+        
+    market_net_model = build_net(cfg.market_net)
+    # <<< 新增結束 >>>
     work_dir = os.path.join(ROOT, cfg.trainer.work_dir)
 
     if not os.path.exists(work_dir):
@@ -124,11 +135,15 @@ def main():
                                                time_steps = time_steps,
                                                act=act,
                                                cri=cri,
+                                                market_net=market_net_model, # <<< 新增：將 market_net 實例傳遞給 Agent >>>
+
                                                act_optimizer=act_optimizer,
                                                cri_optimizer = cri_optimizer,
                                                criterion=criterion,
                                                transition = transition,
-                                               device = device))
+                                               device = device,
+                                               cfg=cfg
+                                               ))
 
     if task_name.startswith("dynamics_test"):
         trainers = []

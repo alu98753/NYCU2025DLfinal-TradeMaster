@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 # 1. 讀 CSV，group by date、pivot 出 adjcp
-df = pd.read_csv('/home/asiadragon/Desktop/zi/NYCU2025DLfinal-TradeMaster/data/portfolio_management/tw50/label/origin_data/test.csv', parse_dates=['date'])
+df = pd.read_csv('/home/asiadragon/Desktop/zi/NYCU2025DLfinal-TradeMaster/data/portfolio_management/tw50/label/origin_data/valid.csv', parse_dates=['date'])
 df = df.sort_values(['date','tic']).reset_index(drop=True)
 adjcp_pivot = df.pivot(index='date', columns='tic', values='adjcp')
 
@@ -27,6 +27,44 @@ rolling_max = cum_index.rolling(window=W, min_periods=W).max()
 drawdown    = 1.0 - (cum_index / rolling_max)
 drawdown    = drawdown.fillna(0)  # 前幾天補 0
 
+'''
+phase1 
+train Regime counts (0,1) =  [1735  975]
+val Regime counts (0,1) =  [159  85]
+test Regime counts (0,1) =  [ 98 148]
+'''
+
+'''v2 '''
+# 6. 設置門檻，打上 regime label
+# #    0 = Sideways, 1 = Bull, 2 = Bear
+# theta_up   = 0.10  # 牛市條件拉高
+# theta_down = -0.015  # 熊市條件放寬
+# dd_thresh  = 0.02
+# dd_safe    = 0.015
+
+# regime = pd.Series(data=np.zeros_like(roll_return.values, dtype=int), index=roll_return.index)
+
+# # 熊市標籤判定
+# regime[(roll_return < theta_down) | (drawdown > dd_thresh)] = 1
+
+# # 額外加入：連跌 5 天的市場也視為熊市
+# mean_5d_return = R_market.rolling(window=5).mean()
+# regime[(mean_5d_return < -0.002)] = 1
+
+# # 牛市標籤判定（限制更嚴）
+# regime[(roll_return > theta_up) & (drawdown < dd_safe)] = 0
+'''v2 done'''
+'''v1 
+2024 
+train Regime counts (0,1) =  [2425  775]
+valid Regime counts (0,1) =  [203  36]
+test Regime counts (0,1) =  [203  39]
+'''
+# 5. 算 20 日內的「高點」→「跌幅」
+rolling_max = cum_index.rolling(window=W, min_periods=W).max()
+drawdown    = 1.0 - (cum_index / rolling_max)
+drawdown    = drawdown.fillna(0)  # 前幾天補 0
+
 # 6. 設置門檻，打上 regime label
 #    0 = Sideways, 1 = Bull, 2 = Bear
 theta_up   = 0.08   # 20 日漲超 5% 以上看為牛市
@@ -41,6 +79,9 @@ regime[ (roll_return < theta_down) | (drawdown > dd_thresh) ] = 1
 
 # 再把「Bull (0)」：必須 > +0.05 且 drawdown < 0.07
 regime[ (roll_return > theta_up) & (drawdown < dd_safe) ] = 0
+'''v1 done'''
+# 剩下皆為 0 (Sideways)
+# regime 已經預設為 0，故不需再特別標
 
 # 剩下皆為 0 (Sideways)
 # regime 已經預設為 0，故不需再特別標
@@ -54,7 +95,7 @@ regime_df = pd.DataFrame({
     'regime':    regime.values.astype(int)
 })
 df_labeled = pd.merge(df, regime_df[['date','regime']], on='date', how='left')
-df_labeled.to_csv('/home/asiadragon/Desktop/zi/NYCU2025DLfinal-TradeMaster/data/portfolio_management/tw50/label/test.csv', index=False)
+df_labeled.to_csv('/home/asiadragon/Desktop/zi/NYCU2025DLfinal-TradeMaster/data/portfolio_management/tw50/label/valid.csv', index=False)
 # 讀回標完號的檔案，檢查 2010-2022 之間各 regime 分佈
 df2 = df_labeled
 # 由於每個 'date' 底下有 50 筆股票，我們只取『某一天的第一支股票』來代表該日 regime

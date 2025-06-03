@@ -1,40 +1,54 @@
 
+eiie_d_model = 64 # 統一定義 d_model，方便引用
+
 act = dict(
-    type = "EIIEConv",
+    type="EIIEConv",
+    # input_dim 和 time_steps 會由 train_eiie.py 動態填充
+    input_dim=None,
+    time_steps=None, # data.time_steps 會被用作這個值 (例如30)
+    
+    d_model=eiie_d_model, # 例如 64
+    n_heads=4,
+    num_encoder_layers=2,
+    dim_feedforward=128, # 通常是 d_model 的 2-4 倍
 
-    # --- 核心輸入維度 (通常由你的訓練腳本動態填充) ---
-    input_dim = None,                       
-    time_steps = 10,                    
-    # --- Transformer Encoder 主要參數 ---
-    d_model = 128,                      # Transformer 內部的主要維度 (embedding dim)
-    n_heads = 4,                        # 多頭注意力機制的頭數 (需確保 d_model % n_heads == 0)
-    num_encoder_layers = 2,             # Transformer Encoder 層的數量 (建議從1-3層開始)
-    dim_feedforward = 256,              # Encoder內部前饋網絡的隱藏層維度 (通常是 d_model 的 2倍或4倍)
+    embed_dropout_p=0.1,
+    transformer_dropout_p=0.2,
+    scoring_hidden_dim=256, # 你原來的設置
+    scoring_dropout_p=0.2,
 
-    # --- Dropout 機率 ---
-    embed_dropout_p = 0.1,              # 輸入嵌入層後的 Dropout
-    transformer_dropout_p = 0.1,        # Transformer Encoder 內部各子層的 Dropout
-
-    # --- 評分頭 (Scoring Head) 參數 ---
-    scoring_hidden_dim = 64,            # 評分MLP的隱藏層維度
-    scoring_dropout_p = 0.1             # 評分MLP的 Dropout
+    # <<< 新增 Actor 特定參數 >>>
+    top_k_stocks_to_select=10,       # Top-K 選股數量
+    default_bull_stock_alloc=0.9     # MarketNet 不可用時，默認牛市股票配置比例
 )
 
 cri = dict(
     type='EIIECritic',
-    input_dim = None,        # Features per stock (F)
-    action_dim = None,     # Number of stocks (N)
-    time_steps=None,       # Look-back window (T)
-    d_model=64,                 # Or match Actor's d_model
-    n_heads=4,                   # Or match Actor's n_heads
-    num_encoder_layers=2,        # Or match Actor's num_encoder_layers
-    dim_feedforward=128,         # Or match Actor's dim_feedforward
+    # input_dim, action_dim, time_steps 會由 train_eiie.py 動態填充
+    input_dim=None,
+    action_dim=None,
+    time_steps=None, # 應與 Actor 的 time_steps 一致
+
+    d_model=eiie_d_model, # 與 Actor 的 d_model 一致
+    n_heads=4,
+    num_encoder_layers=2,
+    dim_feedforward=128,
     embed_dropout_p=0.1,
     transformer_dropout_p=0.1,
-    q_head_hidden_dim=64,       # Hidden layer size for the MLP predicting Q value
-    q_head_dropout_p=0.1
+    q_head_hidden_dim=64, # 你原來的設置
+    q_head_dropout_p=0.1,
+
+    # <<< 新增 Critic 特定參數 >>>
+    num_market_regimes=2  # 市場狀態類別數量 (例如 0:牛, 1:熊)
 )
 
+market_net = dict(
+    type="MarketNet", # 我們創建的 MarketNet 類名
+    input_s_market_dim=eiie_d_model, # <<< 必須與 EIIEConv Actor 的 d_model 一致 >>>
+    hidden_dim=64,                   # MarketNet 內部隱藏層維度
+    num_classes=2,                   # 固定為2 (牛/熊)
+    dropout_p=0.1                    # MarketNet 內部 dropout
+)
 
 # act = dict(
 #     type = "EIIEConv",

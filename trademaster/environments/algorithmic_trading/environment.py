@@ -138,8 +138,8 @@ class AlgorithmicTradingEnvironment(Environments):
                         "Sharp Ratio": ["{:04f}".format(sharpe_ratio)],
                         "Volatility": ["{:04f}%".format(vol* 100)],
                         "Max Drawdown": ["{:04f}%".format(mdd* 100)],
-                        # "Calmar Ratio": ["{:04f}".format(cr)],
-                        # "Sortino Ratio": ["{:04f}".format(sor)],
+                        "Calmar Ratio": ["{:04f}".format(cr)],
+                        "Sortino Ratio": ["{:04f}".format(sor)],
                     }
                 )
             else:

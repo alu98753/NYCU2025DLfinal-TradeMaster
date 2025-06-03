@@ -30,7 +30,7 @@ class PortfolioManagementEIIEEnvironment(Environments):
         self.time_steps = get_attr(self.dataset, "time_steps", 10)
         
         # <<< MODIFICATION START: Add rebalance_interval and related attributes >>>
-        self.rebalance_interval = int(get_attr(kwargs, "rebalance_interval", 1))
+        self.rebalance_interval = int(get_attr(kwargs, "rebalance_interval", 7))
         if self.rebalance_interval <= 0:
             raise ValueError("rebalance_interval must be a positive integer.")
         self.days_since_last_rebalance = 0 # Counter for days since last rebalance
@@ -90,7 +90,26 @@ class PortfolioManagementEIIEEnvironment(Environments):
         close_series_filled = close_series.ffill().bfill()
         close_series_filled = close_series_filled.fillna(0)
         self.close_prices_cube = close_series_filled.unstack(level='tic')[self.unique_tics].to_numpy(dtype=np.float32)
+        
+        if 'regime' not in df_for_pivot.columns:
+            raise ValueError(f"Column 'regime' not found in DataFrame columns: {df_for_pivot.columns.tolist()} from path {self.df_path}. This column is required for MarketNet calibration.")
+        try:
+            regime_series_pivoted = df_for_pivot['regime'].unstack(level='tic') # Shape: [num_unique_dates, num_unique_tics]
+            # 假設當天所有股票的regime相同，取第一列即可
+            if not regime_series_pivoted.empty:
+                 self.regime_by_date = regime_series_pivoted[self.unique_tics[0]].reindex(self.unique_dates).ffill().bfill().to_numpy(dtype=np.int64)
+            else: # 如果數據集很小或特殊情況
+                 self.regime_by_date = np.zeros(self.num_unique_dates, dtype=np.int64) # 默認為0 (牛市)
+                 print("Warning: regime_series_pivoted was empty. Defaulting self.regime_by_date to all zeros.")
 
+            if len(self.regime_by_date) != self.num_unique_dates:
+                 raise ValueError(f"Length of regime_by_date ({len(self.regime_by_date)}) does not match num_unique_dates ({self.num_unique_dates}).")
+            print(f"Successfully loaded 'regime_by_date'. Example values: {self.regime_by_date[:5]}")
+        except Exception as e:
+            print(f"Error processing 'regime' column: {e}")
+            print("Ensure 'regime' column exists and is consistent per date. Defaulting self.regime_by_date to zeros.")
+            self.regime_by_date = np.zeros(self.num_unique_dates, dtype=np.int64) # 備用方案：默認為0 (牛市)
+        # <<< 新增結束 >>>        
         self.state_space_shape = self.stock_dim 
         self.action_space_shape = self.stock_dim 
         
@@ -248,6 +267,8 @@ class PortfolioManagementEIIEEnvironment(Environments):
                     "Sharp Ratio": ["{:04f}".format(sharpe_ratio)],
                     "Volatility": ["{:04f}%".format(vol * 100)],
                     "Max Drawdown": ["{:04f}%".format(mdd * 100)],
+                    "Calmar Ratio": ["{:04f}".format(cr)],
+                    "Sortino Ratio": ["{:04f}".format(sor)],
                 }
             )
             table = print_metrics(stats)
