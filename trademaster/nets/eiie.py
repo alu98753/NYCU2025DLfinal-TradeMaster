@@ -156,7 +156,7 @@ class EIIEConv(Net): # This is your Transformer Actor
 
         logits_flat = self.scoring_head(pooled_output) # Shape: [B*N, 1]
         stock_logits = logits_flat.view(B, N) # Shape: [B, N]
-        # print("stock_logits.std():",stock_logits.std(), "max:",stock_logits.max(), "min:",stock_logits.min())
+        print("stock_logits.std():",stock_logits.std(), "max:",stock_logits.max(), "min:",stock_logits.min())
 
         # --- 根據 MarketNet 信號確定目標股票和現金配置比例 ---
         # 初始化為默認值 (例如，牛市配置)
@@ -198,9 +198,9 @@ class EIIEConv(Net): # This is your Transformer Actor
 
         # Logging only batch 0
         order = torch.argsort(topk_indices[0], descending=True)
-        # print(f"\nBatch {0} Top-{self.top_k_stocks_to_select} Indices:", topk_indices[0][order].tolist())
-        # print(f"Batch {0} Top-{self.top_k_stocks_to_select} Weights:", [round(float(x), 4) for x in topk_relative_weights[0][order]])
-        # print(f"Batch {0} Sum of Top-{self.top_k_stocks_to_select} Weights: {topk_relative_weights[0].sum().item():.4f}")
+        print(f"\nBatch {0} Top-{self.top_k_stocks_to_select} Indices:", topk_indices[0][order].tolist())
+        print(f"Batch {0} Top-{self.top_k_stocks_to_select} Weights:", [round(float(x), 4) for x in topk_relative_weights[0][order]])
+        print(f"Batch {0} Sum of Top-{self.top_k_stocks_to_select} Weights: {topk_relative_weights[0].sum().item():.4f}")
 
 
         # print("\nFinal action_probs:", action_probs.detach().cpu().numpy().round(4))

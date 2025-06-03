@@ -81,6 +81,9 @@ class PortfolioManagementEIIE(AgentBase):
         self.transition = Transition 
         self.last_state = None  # last state of the trajectory for training. last_state.shape == (num_envs, state_dim)
 
+        self.explore_noise_std = get_attr(kwargs, "explore_noise_std", 0.05) # 引入可配置的噪聲標準差
+
+
     def get_save(self):
         models = {
             "act":self.act,
@@ -124,7 +127,16 @@ class PortfolioManagementEIIE(AgentBase):
 
         current_env_state_tensor  = self.last_state  # last_state.shape = (state_dim, ) for a single env.
         # 確保 Actor 和 MarketNet 在評估模式
-        self.act.train()
+        # 
+        
+        # train for no noise
+        # self.act.train()
+        
+        # train for noise
+        self.act.eval()
+        
+        #--------------
+        
         if self.market_net:
             self.market_net.eval()
             
@@ -146,6 +158,15 @@ class PortfolioManagementEIIE(AgentBase):
             # 3. Actor 根據環境狀態和市場狀態信號決定動作
             # Actor 的 forward 方法需要修改為 def forward(self, x, market_regime_signal)
             action_probs_tensor = self.act(current_env_state_tensor, market_regime_signal_tensor) # [B, N+1]
+
+            # --- 添加探索噪聲 (這是關鍵!) ---
+            action_probs_tensor_with_noise = action_probs_tensor + torch.randn_like(action_probs_tensor) * self.explore_noise_std
+            action_probs_tensor_with_noise = torch.clamp(action_probs_tensor_with_noise, min=0.0)
+            sum_of_weights = action_probs_tensor_with_noise.sum(dim=1, keepdim=True)
+            sum_of_weights = torch.where(sum_of_weights == 0, torch.ones_like(sum_of_weights), sum_of_weights)
+            action_probs_tensor = action_probs_tensor_with_noise / sum_of_weights
+            # ---------------------------------
+            
             states[t] = current_env_state_tensor
             s_markets[t] = current_s_market_tensor
             actions[t] = action_probs_tensor # 存儲 agent 輸出的原始動作概率/權重

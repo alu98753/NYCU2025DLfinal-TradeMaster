@@ -452,85 +452,42 @@ class PortfolioManagementEIIEEnvironment(Environments):
             df_value.index = df_date.date
         return df_value
 
-    def analysis_result(self) -> tuple[float, float, float, float, float, float]:
+    def analysis_result(self):
+        # A simpler API for the environment to analysis itself when coming to terminal
         df_return = self.save_portfolio_return_memory()
+        daily_return = df_return.daily_return.values
         df_value = self.save_asset_memory()
+        assets = df_value["total assets"].values
+        df = pd.DataFrame()
+        df["daily_return"] = daily_return
+        df["total assets"] = assets
+        return self.evaualte(df)
+
+    def get_daily_return_rate(self,price_list:list):
+        return_rate_list=[]
+        for i in range(len(price_list)-1):
+            return_rate=(price_list[i+1]/price_list[i])-1
+            return_rate_list.append(return_rate)
+        return return_rate_list
         
-        df_eval = pd.DataFrame()
-        df_eval["daily_return"] = df_return["daily_return"] if "daily_return" in df_return else pd.Series(dtype=np.float64)
-        df_eval["total assets"] = df_value["total assets"] if "total assets" in df_value else pd.Series(dtype=np.float64)
-        
-        if df_eval.empty or df_eval["total assets"].empty or len(df_eval["total assets"]) < 1: # Check if series has at least one element
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-            
-        return self.evaualte(df_eval)
 
-    def get_daily_return_rate(self, price_list: np.ndarray | list[float]) -> list[float]:
-        price_array = np.asarray(price_list, dtype=np.float32)
-        if len(price_array) < 2:
-            return []
-        # Ensure previous prices are not zero to avoid division by zero
-        safe_denominator = np.where(np.abs(price_array[:-1]) < 1e-9, 1e-9, price_array[:-1])
-        return_rates = (price_array[1:] / safe_denominator) - 1
-        return return_rates.tolist()
-        
-    def evaualte(self, df: pd.DataFrame) -> tuple[float, float, float, float, float, float]:
-        if df.empty or df["daily_return"].empty or df["total assets"].empty or len(df["total assets"]) < 1:
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 
+    def evaualte(self, df):
+        daily_return = df["daily_return"]
+        # print(df, df.shape, len(df),len(daily_return))
+        neg_ret_lst = df[df["daily_return"] < 0]["daily_return"]
+        tr = df["total assets"].values[-1] / (df["total assets"].values[0] + 1e-10) - 1
+        return_rate_list=self.get_daily_return_rate(df["total assets"].values)
 
-        daily_return_series = df["daily_return"]
-        total_assets_series = df["total assets"]
-
-        # Ensure series are not empty before attempting to access iloc[0] or iloc[-1]
-        if total_assets_series.empty:
-             return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-
-        neg_ret_series = daily_return_series[daily_return_series < 0]
-        
-        initial_assets = total_assets_series.iloc[0]
-        final_assets = total_assets_series.iloc[-1]
-
-        if np.abs(initial_assets) < 1e-10: # Avoid division by zero if initial assets is ~0
-            tr = 0.0 if np.abs(final_assets) < 1e-10 else np.sign(final_assets) * np.inf
-        else:
-            tr = final_assets / initial_assets - 1
-            
-        return_rate_list_for_sharpe_vol = self.get_daily_return_rate(total_assets_series.values)
-
-        if not return_rate_list_for_sharpe_vol or len(return_rate_list_for_sharpe_vol) == 0: # ensure list is not empty
-            sharpe_ratio = 0.0
-            vol = 0.0
-        else:
-            mean_return = np.mean(return_rate_list_for_sharpe_vol)
-            std_return = np.std(return_rate_list_for_sharpe_vol)
-            sharpe_ratio = mean_return * (252 ** 0.5) / (std_return + 1e-10) # Annualized Sharpe
-            vol = std_return * (252 ** 0.5) # Annualized Volatility
-
-        mdd = 0.0
-        if not total_assets_series.empty:
-            peak = total_assets_series.iloc[0]
-            for value in total_assets_series:
-                if value > peak:
-                    peak = value
-                dd = (peak - value) / peak if np.abs(peak) > 1e-9 else 0.0 
-                if dd > mdd:
-                    mdd = dd
-        
-        # Use annualized return for Calmar Ratio if Sharpe is annualized
-        annualized_return = 0.0
-        if len(total_assets_series) > 1: # Need at least two points for a return period
-            num_days = len(total_assets_series) -1
-            if num_days > 0 :
-                annualized_return = tr * (252.0 / num_days) if num_days < 252 else tr # Simple scaling for periods < 1 year
-
-
-        cr = annualized_return / (mdd + 1e-10) if (mdd > 1e-9 or annualized_return !=0) else 0.0
-        
-        # Sortino Ratio also typically uses annualized mean return
-        std_neg_ret = np.std(neg_ret_series.values) if not neg_ret_series.empty else 0.0
-        # Denominator for Sortino: downside deviation (annualized)
-        downside_deviation_annualized = std_neg_ret * (252**0.5)
-
-        sor = annualized_return / (downside_deviation_annualized + 1e-10) if downside_deviation_annualized > 1e-9 else 0.0
-        
+        sharpe_ratio = np.mean(return_rate_list)*(252)** 0.5 / (np.std(return_rate_list) + 1e-10)
+        vol = np.std(return_rate_list)
+        mdd = 0
+        peak=df["total assets"][0]
+        for value in df["total assets"]:
+            if value>peak:
+                peak=value
+            dd=(peak-value)/peak
+            if dd>mdd:
+                mdd=dd
+        cr = np.sum(daily_return) / (mdd + 1e-10)
+        sor = np.sum(daily_return) / (np.nan_to_num(np.std(neg_ret_lst),0) + 1e-10) / (np.sqrt(len(daily_return))+1e-10)
         return tr, sharpe_ratio, vol, mdd, cr, sor

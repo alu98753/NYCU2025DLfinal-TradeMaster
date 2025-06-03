@@ -28,7 +28,7 @@ data = dict(
         'zopen', 'zhigh', 'zlow', 'zadjcp', 'zclose',
         'zd_5', 'zd_10', 'zd_15', 'zd_20', 'zd_25', 'zd_30'
     ],
-    time_steps=30,#30
+    time_steps=10,#30
     initial_amount=100000,
     transaction_cost_pct=0.000,
     start_date_filter='2018-01-01',)
@@ -45,7 +45,9 @@ agent = dict(
     type='PortfolioManagementEIIE',
     memory_capacity=1000,
     gamma=0.99,
-    policy_update_frequency=500)
+    policy_update_frequency=500,
+    explore_noise_std=0.05,
+    )
 
 trainer = dict(
     type='PortfolioManagementEIIETrainer',
